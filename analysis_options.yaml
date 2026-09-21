@@ -1,0 +1,30 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    - build/**
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    # A public API without a doc comment is the defect this package is least
+    # able to afford: every knob here decides what a phone puts on a metered
+    # radio, and an undocumented one gets guessed at.
+    public_member_api_docs: error
+
+linter:
+  rules:
+    # Every file here is kebab-case (lib/src/export-floor.dart, not
+    # export_floor.dart), which is the house convention across vaam-apps and
+    # is incompatible with `file_names` (lowercase_with_underscores),
+    # inherited transitively via flutter_lints. Disabled deliberately.
+    file_names: false
+    public_member_api_docs: true
+    always_declare_return_types: true
+    avoid_dynamic_calls: true
+    prefer_final_locals: true
+    unawaited_futures: true
+
+# Additional information about this file can be found at
+# https://dart.dev/guides/language/analysis-options

@@ -1,0 +1,43 @@
+name: otel_zone
+description: >-
+  One Talker, one OpenTelemetry SDK and one guarded zone for a Flutter app.
+  Every uncaught framework, async, platform and isolate error lands on the
+  same sink, and a severity floor decides what is worth a metered radio.
+version: 0.1.0 # x-release-please-version
+publish_to: 'none'
+repository: https://github.com/vaam-apps/flutter-otel-zone
+
+environment:
+  sdk: '>=3.8.0 <4.0.0'
+  flutter: '>=3.24.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # The OpenTelemetry SDK. The 1.1 beta line is the *current* release —
+  # 0.11.0 "stable" is an older one, not a newer, so these prereleases are
+  # not a downgrade.
+  dartastic_opentelemetry: ^1.1.0-beta.15
+  # Semantic conventions: `App.appBuildId` for `app.build_id`.
+  dartastic_opentelemetry_api: ^1.0.0-rc.3
+  # Mirrors a Talker record into the OTel logs pipeline. `OtelBridge` is the
+  # thing in front of it that decides which records get that far.
+  otel_talker: ^0.1.0
+  # `OTelGoRouterObserver` — a plain `NavigatorObserver`, which is why
+  # `OtelZone.routeObserver()` works with any router. See the README's note
+  # on this package's spurious `go_router: ^17.0.0` bound.
+  otel_go_router: ^0.2.0
+  # `OTelRiverpodObserver` — a `ProviderObserver`.
+  otel_riverpod: ^0.2.0
+  # For the `ProviderObserver` type alone. The core package, not
+  # flutter_riverpod or hooks_riverpod: an app on either of those already
+  # has this, and an app on neither is not asked to take them.
+  riverpod: ^3.0.0
+  # The log sink itself. Not `talker_flutter`: nothing here renders, and an
+  # app that wants `TalkerScreen` adds it for its own reasons.
+  talker: ^5.1.20
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter

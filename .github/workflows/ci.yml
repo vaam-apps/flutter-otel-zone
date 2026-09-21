@@ -1,0 +1,73 @@
+# The Dart gate. Nothing in `vaam-apps/.github` runs Dart — `lint.yml` says so
+# in its own header ("It does NOT lint Rust or JS/TS", and it never touches
+# Dart either) — so analysis and tests are this repository's own job.
+#
+# Three things run, and each can genuinely fail:
+#
+#   * `flutter analyze` over the package AND the example, with
+#     `public_member_api_docs` raised to an error in analysis_options.yaml.
+#     An undocumented knob in a package whose every knob decides what a phone
+#     puts on a metered radio is the defect this catches.
+#   * `flutter test`, which is the whole export-floor and breadcrumb contract.
+#     None of it needs a device, a collector or a live OTel SDK — that is what
+#     `RecordingTalkerObserver` is for.
+#   * `dart format --set-exit-if-changed`, because a formatter that only runs
+#     on someone's laptop formats differently on the next one.
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to the exact build, not to a channel. `channel: main` alone
+  # installs whatever main's HEAD is that day, which turns an unrelated
+  # upstream change into a red run here. This is the same pin
+  # `vaam-apps/vaam-apps`'s own ci.yml carries, so a green run here means the
+  # package analyses under the Dart the consuming app is actually built with
+  # — the one place the two must agree.
+  FLUTTER_VERSION: "3.48.0-0.4.pre"
+
+jobs:
+  dart:
+    name: analyze and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: main
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Resolve
+        run: flutter pub get
+
+      # The example resolves through a path dependency on the package, so this
+      # is also the check that the public API the README shows still compiles.
+      - name: Resolve the example
+        working-directory: example
+        run: flutter pub get
+
+      - name: Format
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
