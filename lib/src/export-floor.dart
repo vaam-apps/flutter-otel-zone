@@ -29,10 +29,7 @@ final class ExportFloor {
   /// whatever connection they are paying for; one that defaults to quiet
   /// loses debug breadcrumbs from the wire and keeps every fault, which is
   /// the cheaper way to be wrong.
-  factory ExportFloor.parse(
-    String name, {
-    LogLevel fallback = defaultLevel,
-  }) {
+  factory ExportFloor.parse(String name, {LogLevel fallback = defaultLevel}) {
     final LogLevel? parsed = parseLogLevel(name);
     return ExportFloor._(parsed ?? fallback, parsed == null ? name : null);
   }

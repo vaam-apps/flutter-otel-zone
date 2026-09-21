@@ -182,8 +182,8 @@ class OtelZone {
         'as ${config.serviceName} $serviceVersion$build$environment, '
         'records at ${config.exportFloor.level.name} and above'
         '${unrecognised == null ? '' : ' — the configured export level said '
-              '"$unrecognised", which is not a level; '
-              'fell back to ${config.exportFloor.level.name}'}';
+                  '"$unrecognised", which is not a level; '
+                  'fell back to ${config.exportFloor.level.name}'}';
   }
 
   /// The single reporting entry point for an error the app caught itself.

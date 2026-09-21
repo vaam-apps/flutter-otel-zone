@@ -155,25 +155,27 @@ void main() {
       );
     });
 
-    test('a failed start is a warning on the talker, not a thrown error',
-        () async {
-      final OtelZone subject = zone(
-        const OtelZoneConfig(
-          serviceName: 'test-app',
-          // An empty version makes OTel.initialize throw ArgumentError, which
-          // is the cheapest way to exercise the failure path without a
-          // network.
-          endpoint: 'http://127.0.0.1:4318',
-          useConsoleLogs: false,
-        ),
-      );
-      await subject.start(serviceVersion: '');
-      expect(subject.isReady, isFalse);
-      expect(
-        subject.talker.history.map((TalkerData e) => e.message).join('\n'),
-        contains('OpenTelemetry did not start'),
-      );
-    });
+    test(
+      'a failed start is a warning on the talker, not a thrown error',
+      () async {
+        final OtelZone subject = zone(
+          const OtelZoneConfig(
+            serviceName: 'test-app',
+            // An empty version makes OTel.initialize throw ArgumentError, which
+            // is the cheapest way to exercise the failure path without a
+            // network.
+            endpoint: 'http://127.0.0.1:4318',
+            useConsoleLogs: false,
+          ),
+        );
+        await subject.start(serviceVersion: '');
+        expect(subject.isReady, isFalse);
+        expect(
+          subject.talker.history.map((TalkerData e) => e.message).join('\n'),
+          contains('OpenTelemetry did not start'),
+        );
+      },
+    );
   });
 
   group('the error zone', () {
@@ -198,25 +200,27 @@ void main() {
       );
     });
 
-    test('an uncaught async error inside the zone reaches the talker',
-        () async {
-      final OtelZone subject = zone();
+    test(
+      'an uncaught async error inside the zone reaches the talker',
+      () async {
+        final OtelZone subject = zone();
 
-      await subject.runGuarded(() async {
-        unawaited(Future<void>.error(StateError('escaped')));
-        // Let the microtask queue deliver it before the body returns.
-        await Future<void>.delayed(Duration.zero);
-      });
+        await subject.runGuarded(() async {
+          unawaited(Future<void>.error(StateError('escaped')));
+          // Let the microtask queue deliver it before the body returns.
+          await Future<void>.delayed(Duration.zero);
+        });
 
-      expect(
-        subject.talker.history.any(
-          (TalkerData entry) =>
-              entry.error?.toString().contains('escaped') ?? false,
-        ),
-        isTrue,
-        reason: 'the zone handler is the only thing that catches this one',
-      );
-    });
+        expect(
+          subject.talker.history.any(
+            (TalkerData entry) =>
+                entry.error?.toString().contains('escaped') ?? false,
+          ),
+          isTrue,
+          reason: 'the zone handler is the only thing that catches this one',
+        );
+      },
+    );
 
     test('a framework error reaches the talker', () async {
       final OtelZone subject = zone();

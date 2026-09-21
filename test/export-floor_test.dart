@@ -63,10 +63,13 @@ void main() {
       expect(floor.carries(LogLevel.critical), isTrue);
     });
 
-    test('a record with no level is treated as info, as the exporter would', () {
-      expect(floor.carries(null), isFalse);
-      expect(const ExportFloor.of(LogLevel.info).carries(null), isTrue);
-    });
+    test(
+      'a record with no level is treated as info, as the exporter would',
+      () {
+        expect(floor.carries(null), isFalse);
+        expect(const ExportFloor.of(LogLevel.info).carries(null), isTrue);
+      },
+    );
 
     test('ranks by severity, not by the enum declaration order', () {
       // `LogLevel` is declared `error, critical, info, debug, verbose,

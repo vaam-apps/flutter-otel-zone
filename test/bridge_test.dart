@@ -145,18 +145,25 @@ void main() {
       expect(sink.records.single.title, isNot('breadcrumbs'));
     });
 
-    test('none when the floor withholds nothing — they would be duplicates', () {
-      final RecordingTalkerObserver sink = RecordingTalkerObserver();
-      final OtelBridge bridge = bridgeWith(
-        floor: LogLevel.debug,
-        sink: sink,
-        history: trail(3),
-      )..ready = true;
+    test(
+      'none when the floor withholds nothing — they would be duplicates',
+      () {
+        final RecordingTalkerObserver sink = RecordingTalkerObserver();
+        final OtelBridge bridge = bridgeWith(
+          floor: LogLevel.debug,
+          sink: sink,
+          history: trail(3),
+        )..ready = true;
 
-      bridge.onError(TalkerError(StateError('boom')));
+        bridge.onError(TalkerError(StateError('boom')));
 
-      expect(sink.records.length, 1, reason: 'the trail is already on the wire');
-    });
+        expect(
+          sink.records.length,
+          1,
+          reason: 'the trail is already on the wire',
+        );
+      },
+    );
 
     test('an exception carries them too', () {
       final RecordingTalkerObserver sink = RecordingTalkerObserver();
@@ -200,7 +207,8 @@ void main() {
       expect(
         sink.records.single.message,
         'it broke',
-        reason: 'the breadcrumbs and the record they decorate are forwarded '
+        reason:
+            'the breadcrumbs and the record they decorate are forwarded '
             'in two separate guarded calls for exactly this case',
       );
     });
