@@ -3,7 +3,7 @@ description: >-
   One Talker, one OpenTelemetry SDK and one guarded zone for a Flutter app.
   Every uncaught framework, async, platform and isolate error lands on the
   same sink, and a severity floor decides what is worth a metered radio.
-version: 0.1.0 # x-release-please-version
+version: 0.2.0 # x-release-please-version
 publish_to: 'none'
 repository: https://github.com/vaam-apps/flutter-otel-zone
 
