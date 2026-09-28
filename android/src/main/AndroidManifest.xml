@@ -1,2 +1,22 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application>
+    <!--
+      Runs OtelZoneInitializer before Application.onCreate, so the JVM crash
+      handler is installed before any app code runs and a crash during startup
+      is still captured.
+
+      A library cannot add itself to the app's own InitializationProvider, so
+      this is a second provider instance with its own authority. The manifest
+      merger keeps both.
+    -->
+    <provider
+      android:name="androidx.startup.InitializationProvider"
+      android:authorities="${applicationId}.otel_zone.startup"
+      android:exported="false"
+      android:enabled="true">
+      <meta-data
+        android:name="com.vaam.otel_zone.OtelZoneInitializer"
+        android:value="androidx.startup" />
+    </provider>
+  </application>
 </manifest>

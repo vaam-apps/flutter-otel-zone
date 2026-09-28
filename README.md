@@ -217,9 +217,12 @@ pending() -> redact -> FATAL LogRecord -> spool -> acknowledge
 - **Web is a no-op**, and a platform read that fails is one warning on the
   talker, never a thrown error.
 
-The platform side ships as a no-op in this version: the channel exists and the
-Dart drain is complete, but the Android and iOS handlers that actually read the
-OS records land in their own tickets. That is what lets the contract be tested
+On Android the JVM side is live: a chained
+`Thread.setDefaultUncaughtExceptionHandler`, installed through androidx.startup
+before `Application.onCreate`, writes one JSON report per uncaught exception
+into `noBackupFilesDir/otel_zone/crashes`, and `pending()` returns them. Reading
+the OS's own record (`ApplicationExitInfo`) and the whole iOS side are still
+no-ops and land in their own tickets. That is what lets the contract be tested
 today — `NativeCrashSource` is the seam.
 
 The channel is generated, not written by hand:
