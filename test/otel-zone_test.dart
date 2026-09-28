@@ -122,6 +122,17 @@ void main() {
       );
     });
 
+    test('reports how much of the spool was replayed', () {
+      expect(
+        zone().startupSummary('1.2.3', null, replayed: 1),
+        endsWith('records at warning and above, replayed 1 spooled batch'),
+      );
+      expect(
+        zone().startupSummary('1.2.3', null, replayed: 3),
+        endsWith('records at warning and above, replayed 3 spooled batches'),
+      );
+    });
+
     test('an unreadable export level reports itself', () {
       final OtelZone typo = zone(
         OtelZoneConfig(

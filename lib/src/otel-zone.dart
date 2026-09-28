@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Directory;
 import 'dart:isolate';
 
 import 'package:dartastic_opentelemetry/dartastic_opentelemetry.dart';
@@ -12,6 +13,7 @@ import 'package:talker/talker.dart';
 
 import 'bridge.dart';
 import 'config.dart';
+import 'spool.dart';
 
 /// One `Talker`, one OpenTelemetry SDK, and one guarded zone that funnels
 /// every uncaught error in the process into both.
@@ -127,6 +129,21 @@ class OtelZone {
     // silently changing the app's lifecycle wiring on a retry.
     _watchLifecycle();
     try {
+      // Built before `initialize` so the pipeline is handed an exporter that
+      // already knows where to spool. `null` leaves dartastic's own exporter
+      // in place, which is what every build that does not opt in gets.
+      final Directory Function()? spoolDirectory = config.spoolDirectory;
+      SpoolingLogRecordExporter? spool;
+      if (spoolDirectory != null) {
+        spool = SpoolingLogRecordExporter(
+          delegate: OtlpHttpLogRecordExporter(
+            OtlpHttpLogRecordExporterConfig(endpoint: config.endpoint),
+          ),
+          directory: spoolDirectory(),
+          maxBatches: config.spoolMaxBatches,
+          maxAge: config.spoolMaxAge,
+        );
+      }
       await OTel.initialize(
         serviceName: config.serviceName,
         serviceVersion: serviceVersion,
@@ -134,6 +151,7 @@ class OtelZone {
         secure: config.secure,
         enableLogs: config.enableLogs,
         enableMetrics: config.enableMetrics,
+        logRecordExporter: spool,
         resourceAttributes: OTel.attributesFromMap(<String, String>{
           ...resourceAttributes,
           App.appBuildId.key: ?buildId,
@@ -143,7 +161,26 @@ class OtelZone {
       // Only now may the bridge forward: `OTel.loggerProvider()` throws
       // until initialize() has returned successfully.
       bridge.ready = true;
-      talker.warning(startupSummary(serviceVersion, buildId));
+      final SpoolingLogRecordExporter? exporter = spool;
+      if (exporter == null) {
+        talker.warning(startupSummary(serviceVersion, buildId));
+      } else {
+        // Replay reaches for the network, and `start` is awaited before
+        // `runApp`, so it cannot be on that path. The summary does wait for
+        // it: with spooling on, how much was replayed is the line's point.
+        unawaited(
+          exporter
+              .replay()
+              .then(
+                (int replayed) => talker.warning(
+                  startupSummary(serviceVersion, buildId, replayed: replayed),
+                ),
+              )
+              .catchError((Object _) {
+                talker.warning(startupSummary(serviceVersion, buildId));
+              }),
+        );
+      }
     } on Object catch (error, stackTrace) {
       bridge.ready = false;
       // Deliberately a warning, not an error: nothing the user does is
@@ -183,15 +220,27 @@ class OtelZone {
   /// // 'OpenTelemetry: exporting to https://otel.example.com as my-app '
   /// // '1.2.3 build 48 (production), records at warning and above'
   /// ```
-  String startupSummary(String serviceVersion, String? buildId) {
+  ///
+  /// [replayed] is the count of spooled batches handed back to the collector
+  /// on this launch, and is `null` when nothing is spooled. It is part of the
+  /// line rather than a line of its own because "did the backlog drain" is
+  /// answered by the same reader who asks "is this build exporting".
+  String startupSummary(
+    String serviceVersion,
+    String? buildId, {
+    int? replayed,
+  }) {
     final String environment = config.deploymentEnvironmentName == null
         ? ''
         : ' (${config.deploymentEnvironmentName})';
     final String build = buildId == null ? '' : ' build $buildId';
+    final String spooled = replayed == null
+        ? ''
+        : ', replayed $replayed spooled ${replayed == 1 ? 'batch' : 'batches'}';
     final String? unrecognised = config.exportFloor.unrecognised;
     return 'OpenTelemetry: exporting to ${config.endpoint} '
         'as ${config.serviceName} $serviceVersion$build$environment, '
-        'records at ${config.exportFloor.level.name} and above'
+        'records at ${config.exportFloor.level.name} and above$spooled'
         '${unrecognised == null ? '' : ' — the configured export level said '
                   '"$unrecognised", which is not a level; '
                   'fell back to ${config.exportFloor.level.name}'}';

@@ -20,6 +20,10 @@ dependencies:
   dartastic_opentelemetry: ^1.1.0-beta.15
   # Semantic conventions: `App.appBuildId` for `app.build_id`.
   dartastic_opentelemetry_api: ^1.0.0-rc.3
+  # `Int64`, which the SDK's public log-record API takes and returns for
+  # timestamps but does not re-export. Already in the graph via the SDK, so
+  # this adds no package an install did not already have.
+  fixnum: ^1.1.1
   # Mirrors a Talker record into the OTel logs pipeline. `OtelBridge` is the
   # thing in front of it that decides which records get that far.
   otel_talker: ^0.1.0

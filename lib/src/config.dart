@@ -1,3 +1,5 @@
+import 'dart:io' show Directory;
+
 import 'package:flutter/foundation.dart' show kDebugMode;
 
 import 'export-floor.dart';
@@ -58,6 +60,9 @@ final class OtelZoneConfig {
     this.presentFlutterErrors = kDebugMode,
     this.enableLogs = true,
     this.enableMetrics = false,
+    this.spoolDirectory,
+    this.spoolMaxBatches = 32,
+    this.spoolMaxAge = const Duration(days: 7),
     bool? secure,
   }) : _loggerName = loggerName,
        _secure = secure;
@@ -167,6 +172,29 @@ final class OtelZoneConfig {
   /// explicit long interval and a named list of instruments, never the
   /// default reader.
   final bool enableMetrics;
+
+  /// Where failed batches are spooled, or `null` for no spooling.
+  ///
+  /// `null` is the default and the behaviour every existing build has: a
+  /// batch the collector refuses is retried in memory and then dropped.
+  /// Supply a provider — `getApplicationSupportDirectory` from
+  /// `path_provider`, read after the binding exists — to add a durable step
+  /// between "refused" and "dropped", and have [OtelZone.start] replay what
+  /// is left on the next launch.
+  ///
+  /// A function rather than a [Directory] because the directory does not
+  /// exist to be named until the platform channels do, which is after this
+  /// config is built.
+  final Directory Function()? spoolDirectory;
+
+  /// The most spool files kept before the oldest is evicted.
+  ///
+  /// A cap, not a preference: a phone that never reconnects must not fill its
+  /// disk with telemetry nobody collected.
+  final int spoolMaxBatches;
+
+  /// The age past which a spool file is discarded, or `null` for no age cap.
+  final Duration? spoolMaxAge;
 
   final String? _loggerName;
   final bool? _secure;
