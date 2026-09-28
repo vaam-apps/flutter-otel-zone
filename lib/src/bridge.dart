@@ -1,6 +1,7 @@
 import 'package:otel_talker/otel_talker.dart';
 import 'package:talker/talker.dart';
 
+import 'config.dart';
 import 'export-floor.dart';
 
 /// Forwards Talker records to OpenTelemetry — the ones worth the radio,
@@ -68,6 +69,7 @@ class OtelBridge extends TalkerObserver {
     String loggerName = 'package.talker',
     this.breadcrumbCount = 12,
     this.breadcrumbLineLimit = 160,
+    this.redact,
     TalkerObserver? sink,
   }) : _history = history,
        _sink = sink ?? OTelTalkerObserver(loggerName: loggerName);
@@ -81,6 +83,14 @@ class OtelBridge extends TalkerObserver {
   /// The length one breadcrumb line is truncated to.
   final int breadcrumbLineLimit;
 
+  /// Scrubs every exported record, or `null` for none.
+  ///
+  /// Applied to the message, the title, the error/exception text, the stack
+  /// trace and each breadcrumb line, before truncation and before the sink
+  /// sees any of it. A [redact] that throws drops the record instead of
+  /// letting it through (fail closed).
+  final Redactor? redact;
+
   final TalkerObserver _sink;
   final List<TalkerData> Function() _history;
 
@@ -89,14 +99,25 @@ class OtelBridge extends TalkerObserver {
   bool ready = false;
 
   @override
-  void onLog(TalkerData log) => _handle(log, () => _sink.onLog(log));
+  void onLog(TalkerData log) => _handle(
+    log,
+    () => _sink.onLog(log),
+    (TalkerData redacted) => _sink.onLog(redacted),
+  );
 
   @override
-  void onError(TalkerError err) => _handle(err, () => _sink.onError(err));
+  void onError(TalkerError err) => _handle(
+    err,
+    () => _sink.onError(err),
+    (TalkerData redacted) => _sink.onError(_errorOf(redacted)),
+  );
 
   @override
-  void onException(TalkerException err) =>
-      _handle(err, () => _sink.onException(err));
+  void onException(TalkerException err) => _handle(
+    err,
+    () => _sink.onException(err),
+    (TalkerData redacted) => _sink.onException(_exceptionOf(redacted)),
+  );
 
   /// Whether a record at [level] is exported.
   ///
@@ -114,13 +135,91 @@ class OtelBridge extends TalkerObserver {
   /// ```
   bool carries(LogLevel? level) => floor.carries(level);
 
-  void _handle(TalkerData data, void Function() forwardRecord) {
+  /// Applies the floor, then forwards the record — redacted when a [redact]
+  /// is configured, untouched otherwise.
+  ///
+  /// [forwardOriginal] and [forwardRedacted] are separate because the sink's
+  /// fault channels are typed (`onError`/`onException`), so a scrubbed record
+  /// has to be rebuilt as the matching `TalkerError`/`TalkerException`. With
+  /// no [redact] the original object goes straight through, so nothing about
+  /// the wire changes for a build that does not scrub.
+  void _handle(
+    TalkerData data,
+    void Function() forwardOriginal,
+    void Function(TalkerData redacted) forwardRedacted,
+  ) {
     if (!carries(data.logLevel)) return;
     // Two separate guarded calls: a trail that cannot be built must never
     // cost the fault it was decorating.
     _forward(() => _emitBreadcrumbs(data));
-    _forward(forwardRecord);
+    final TalkerData? redacted = _redact(data);
+    // Fail closed: a redactor that throws drops the record rather than
+    // letting unscrubbed text reach the sink.
+    if (redacted == null) return;
+    _forward(
+      identical(redacted, data)
+          ? forwardOriginal
+          : () => forwardRedacted(redacted),
+    );
   }
+
+  /// A copy of [data] with every string scrubbed, the original object when
+  /// there is no [redact], or `null` when the redactor threw — which drops
+  /// the record.
+  ///
+  /// Only ever called for a record that clears the floor, so a build's
+  /// scrubbing cost is proportional to what it actually exports.
+  TalkerData? _redact(TalkerData data) {
+    final Redactor? redact = this.redact;
+    if (redact == null) return data;
+    try {
+      // The two fault fields are scrubbed independently: a record may carry
+      // both, and deriving one wrapper from `error ?? exception` would then
+      // cast it to the other type and drop the whole record.
+      final Error? error = data.error == null
+          ? null
+          : _RedactedError(
+              data.error!.runtimeType.toString(),
+              redact(data.error!.toString()),
+            );
+      final Object? exception = data.exception == null
+          ? null
+          : _RedactedException(
+              data.exception!.runtimeType.toString(),
+              redact(data.exception!.toString()),
+            );
+      return TalkerData(
+        redact(data.message ?? ''),
+        logLevel: data.logLevel,
+        error: error,
+        exception: exception,
+        stackTrace: data.stackTrace == null
+            ? null
+            : _RedactedStackTrace(redact(data.stackTrace.toString())),
+        title: data.title == null ? null : redact(data.title!),
+        time: data.time,
+        key: data.key,
+      );
+    } on Object {
+      return null;
+    }
+  }
+
+  TalkerError _errorOf(TalkerData redacted) => TalkerError(
+    redacted.error!,
+    message: redacted.message,
+    stackTrace: redacted.stackTrace,
+    title: redacted.title,
+    logLevel: redacted.logLevel,
+  );
+
+  TalkerException _exceptionOf(TalkerData redacted) => TalkerException(
+    redacted.exception! as Exception,
+    message: redacted.message,
+    stackTrace: redacted.stackTrace,
+    title: redacted.title,
+    logLevel: redacted.logLevel,
+  );
 
   /// The trail that goes with a fault, as one record.
   ///
@@ -142,9 +241,18 @@ class OtelBridge extends TalkerObserver {
         ? recent.sublist(recent.length - breadcrumbCount)
         : recent;
 
+    final List<String> lines = <String>[];
+    for (final TalkerData entry in trail) {
+      final String? line = _breadcrumb(entry);
+      // Fail closed: one line the redactor cannot scrub drops the whole
+      // trail, because a trail is only useful as a set.
+      if (line == null) return;
+      lines.add(line);
+    }
+
     _sink.onLog(
       TalkerData(
-        trail.map(_breadcrumb).join('\n'),
+        lines.join('\n'),
         logLevel: level,
         time: data.time,
         title: 'breadcrumbs',
@@ -152,12 +260,26 @@ class OtelBridge extends TalkerObserver {
     );
   }
 
-  String _breadcrumb(TalkerData entry) {
+  /// One breadcrumb line, redacted *before* truncation, or `null` when the
+  /// redactor throws.
+  ///
+  /// Before truncation matters: truncating first would let a redactor miss
+  /// the part of a value that the limit cut off.
+  String? _breadcrumb(TalkerData entry) {
     final String line =
         '${entry.displayTime()} [${entry.title}] ${entry.message ?? ''}';
-    return line.length <= breadcrumbLineLimit
-        ? line
-        : '${line.substring(0, breadcrumbLineLimit)}…';
+    String scrubbed = line;
+    final Redactor? redact = this.redact;
+    if (redact != null) {
+      try {
+        scrubbed = redact(line);
+      } on Object {
+        return null;
+      }
+    }
+    return scrubbed.length <= breadcrumbLineLimit
+        ? scrubbed
+        : '${scrubbed.substring(0, breadcrumbLineLimit)}…';
   }
 
   void _forward(void Function() emit) {
@@ -171,4 +293,42 @@ class OtelBridge extends TalkerObserver {
       // console; losing its OTel copy is the smallest possible failure.
     }
   }
+}
+
+/// A scrubbed stand-in for an `Error`, carrying only redacted text.
+///
+/// `OTelTalkerObserver` reads the fault's `runtimeType` for `exception.type`
+/// and its `toString()` for `exception.message`. A wrapper cannot report the
+/// original `runtimeType`, so [type] is prefixed onto the rendered text
+/// instead — the type survives inside `exception.message` rather than being
+/// lost with the stringification.
+class _RedactedError extends Error {
+  _RedactedError(this.type, this.text);
+
+  final String type;
+  final String text;
+
+  @override
+  String toString() => '$type: $text';
+}
+
+/// The `Exception` counterpart of [_RedactedError].
+class _RedactedException implements Exception {
+  _RedactedException(this.type, this.text);
+
+  final String type;
+  final String text;
+
+  @override
+  String toString() => '$type: $text';
+}
+
+/// A scrubbed stand-in for a [StackTrace], for `exception.stacktrace`.
+class _RedactedStackTrace implements StackTrace {
+  _RedactedStackTrace(this.text);
+
+  final String text;
+
+  @override
+  String toString() => text;
 }

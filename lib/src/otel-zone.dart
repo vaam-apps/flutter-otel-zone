@@ -56,6 +56,7 @@ class OtelZone {
       loggerName: config.loggerName,
       breadcrumbCount: config.breadcrumbCount,
       breadcrumbLineLimit: config.breadcrumbLineLimit,
+      redact: config.redact,
       sink: sink,
     );
     this.talker =

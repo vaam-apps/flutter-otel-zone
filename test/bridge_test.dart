@@ -213,6 +213,156 @@ void main() {
       );
     });
   });
+
+  group('redaction (ticket #8)', () {
+    String scrub(String input) => input.replaceAll(RegExp(r'\d{9}'), '<phone>');
+
+    OtelBridge redactingWith({
+      required RecordingTalkerObserver sink,
+      required Redactor redact,
+      List<TalkerData> history = const <TalkerData>[],
+      LogLevel floor = LogLevel.warning,
+      int breadcrumbLineLimit = 160,
+    }) => OtelBridge(
+      floor: ExportFloor.of(floor),
+      history: () => history,
+      sink: sink,
+      redact: redact,
+      breadcrumbLineLimit: breadcrumbLineLimit,
+    )..ready = true;
+
+    test('message, error text and stack all leave scrubbed', () {
+      final RecordingTalkerObserver sink = RecordingTalkerObserver();
+      final OtelBridge bridge = redactingWith(sink: sink, redact: scrub);
+
+      bridge.onException(
+        TalkerException(
+          Exception('could not send to 699887766'),
+          message: 'request to 699887766 failed',
+          stackTrace: StackTrace.fromString('#0 reach(699887766)'),
+        ),
+      );
+
+      final TalkerData record = sink.records.single;
+      expect(record.message, 'request to <phone> failed');
+      expect(record.exception.toString(), contains('<phone>'));
+      expect(record.exception.toString(), isNot(contains('699887766')));
+      expect(record.stackTrace.toString(), contains('<phone>'));
+      expect(record.stackTrace.toString(), isNot(contains('699887766')));
+    });
+
+    test('an error is scrubbed too, and keeps its type name', () {
+      final RecordingTalkerObserver sink = RecordingTalkerObserver();
+      final OtelBridge bridge = redactingWith(sink: sink, redact: scrub);
+
+      bridge.onError(
+        TalkerError(StateError('bad 699887766'), message: 'it broke'),
+      );
+
+      final TalkerData record = sink.records.single;
+      expect(record.message, 'it broke');
+      expect(record.error.toString(), contains('<phone>'));
+      expect(record.error.toString(), contains('StateError'));
+      expect(record.error.toString(), isNot(contains('699887766')));
+    });
+
+    test('breadcrumbs are scrubbed before truncation', () {
+      final RecordingTalkerObserver sink = RecordingTalkerObserver();
+      final OtelBridge bridge = redactingWith(
+        sink: sink,
+        // Shortens the line below the limit; a truncate-first order would cut
+        // the number into a shorter run the redactor cannot match.
+        redact: (String input) => input.replaceAll(RegExp(r'\d{9}'), '<p>'),
+        history: <TalkerData>[
+          TalkerData('saw 699887766', logLevel: LogLevel.info, title: 'route'),
+        ],
+        // The redacted line fits; the raw one does not (the time prefix is a
+        // fixed 12–14 chars and the number is 9), so a truncate-first order
+        // would cut the number into a run the redactor cannot match.
+        breadcrumbLineLimit: 32,
+      );
+
+      bridge.onError(TalkerError(StateError('boom')));
+
+      final String line = sink.records.first.message!;
+      expect(sink.records.first.title, 'breadcrumbs');
+      expect(line, contains('<p>'));
+      expect(line, isNot(contains('699887766')));
+    });
+
+    test('the record title is scrubbed too', () {
+      final RecordingTalkerObserver sink = RecordingTalkerObserver();
+      final OtelBridge bridge = redactingWith(sink: sink, redact: scrub);
+
+      bridge.onLog(
+        TalkerData(
+          'offline',
+          logLevel: LogLevel.warning,
+          title: 'route 699887766',
+        ),
+      );
+      bridge.onError(
+        TalkerError(StateError('boom'), title: 'provider 699887766'),
+      );
+
+      expect(sink.records[0].title, 'route <phone>');
+      expect(sink.records[1].title, 'provider <phone>');
+    });
+
+    test('a record carrying both an error and an exception is not dropped', () {
+      final RecordingTalkerObserver sink = RecordingTalkerObserver();
+      final OtelBridge bridge = redactingWith(sink: sink, redact: scrub);
+
+      bridge.onLog(
+        TalkerData(
+          'both 699887766',
+          logLevel: LogLevel.warning,
+          error: StateError('err 699887766'),
+          exception: Exception('ex 699887766'),
+        ),
+      );
+
+      final TalkerData record = sink.records.single;
+      expect(record.message, 'both <phone>');
+      expect(record.error.toString(), contains('<phone>'));
+      expect(record.exception.toString(), contains('<phone>'));
+    });
+
+    test('a throwing redactor drops the record and does not throw', () {
+      final RecordingTalkerObserver sink = RecordingTalkerObserver();
+      final OtelBridge bridge = redactingWith(
+        sink: sink,
+        redact: (String input) => throw StateError('no scrubber today'),
+      );
+
+      expect(
+        () => bridge.onError(TalkerError(StateError('boom'), message: 'x')),
+        returnsNormally,
+      );
+      expect(
+        sink.records,
+        isEmpty,
+        reason: 'fail closed: unscrubbed text must not reach the sink',
+      );
+    });
+
+    test('nothing below the floor is redacted or exported', () {
+      final RecordingTalkerObserver sink = RecordingTalkerObserver();
+      var redactions = 0;
+      final OtelBridge bridge = redactingWith(
+        sink: sink,
+        redact: (String input) {
+          redactions++;
+          return input;
+        },
+      );
+
+      bridge.onLog(TalkerData('a route change', logLevel: LogLevel.info));
+
+      expect(sink.records, isEmpty);
+      expect(redactions, 0, reason: 'the floor is checked before redaction');
+    });
+  });
 }
 
 class _ThrowingObserver extends TalkerObserver {
