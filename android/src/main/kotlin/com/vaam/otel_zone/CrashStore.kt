@@ -42,7 +42,8 @@ internal fun crashDirectory(context: Context): File =
 internal class CrashStore(
     private val directory: File,
     private val maxReports: Int = DEFAULT_MAX_REPORTS,
-    private val nowMicros: () -> Long = { System.currentTimeMillis() * 1000L },
+    private val nowMillis: () -> Long = System::currentTimeMillis,
+    private val staleTempMillis: Long = DEFAULT_STALE_TEMP_MILLIS,
 ) : JvmCrashRecorder {
 
     private val sequence = AtomicLong(0)
@@ -55,7 +56,7 @@ internal class CrashStore(
         val report = JSONObject()
             .put("id", id)
             .put("kind", JVM_KIND)
-            .put("timestampMicros", nowMicros())
+            .put("timestampMicros", nowMillis() * 1000L)
             .put("type", throwable.javaClass.name)
             .put("message", throwable.message)
             .put("stacktrace", throwable.stackTraceToString())
@@ -101,7 +102,7 @@ internal class CrashStore(
      */
     private fun nextId(): String {
         while (true) {
-            val id = "$JVM_KIND-%016d-%04d".format(nowMicros(), sequence.getAndIncrement())
+            val id = "$JVM_KIND-%016d-%04d".format(nowMillis(), sequence.getAndIncrement())
             if (!File(directory, "$id$SUFFIX").exists()) return id
         }
     }
@@ -126,15 +127,24 @@ internal class CrashStore(
             .orEmpty()
 
     /**
-     * Deletes temp files no live write owns.
+     * Deletes temp files that no live write can still own.
      *
-     * Only a process that died between write and rename leaves one behind,
-     * and nothing else looks for a `*.tmp`, so without this they accumulate
-     * for the life of the install.
+     * A temp file only survives its writer when the process died between the
+     * write and the rename, and nothing else looks for a `*.tmp`, so without
+     * this they accumulate for the life of the install.
+     *
+     * The age check is what keeps a sweep from destroying a crash: [pending]
+     * runs on `Dispatchers.IO` while a crash can land on any thread at the
+     * same moment, and a write that is in flight is milliseconds old. Only a
+     * file nobody could still be writing is treated as a corpse.
      */
     private fun sweepTemps() {
+        val cutoff = nowMillis() - staleTempMillis
+        // lastModified() answers 0 when the filesystem will not say, and an
+        // unknown age is not evidence of a live write.
         directory
             .listFiles { file -> file.isFile && file.name.endsWith(TEMP_SUFFIX) }
+            ?.filter { it.lastModified() < cutoff }
             ?.forEach { it.delete() }
     }
 
@@ -176,6 +186,9 @@ internal class CrashStore(
         const val SUFFIX = ".json"
         const val TEMP_SUFFIX = ".tmp"
         const val DEFAULT_MAX_REPORTS = 16
+
+        /** Long enough that no in-flight write is ever this old. */
+        const val DEFAULT_STALE_TEMP_MILLIS = 5 * 60 * 1000L
         val SAFE_ID = Regex("^[A-Za-z0-9_-]+$")
     }
 }

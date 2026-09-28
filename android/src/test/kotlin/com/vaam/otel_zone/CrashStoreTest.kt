@@ -13,10 +13,18 @@ import kotlin.test.assertTrue
 class CrashStoreTest {
 
     private val directory: File = Files.createTempDirectory("otel-zone-crashes").toFile()
-    private var micros = 1_700_000_000_000_000L
+    private var millis = 1_700_000_000_000L
+
+    /** Shorter than the production five minutes, so tests stay readable. */
+    private val staleWindow = 60_000L
 
     private fun store(maxReports: Int = 16): CrashStore =
-        CrashStore(directory = directory, maxReports = maxReports, nowMicros = { micros++ })
+        CrashStore(
+            directory = directory,
+            maxReports = maxReports,
+            nowMillis = { millis++ },
+            staleTempMillis = staleWindow,
+        )
 
     @AfterTest
     fun removeDirectory() {
@@ -97,6 +105,7 @@ class CrashStoreTest {
         directory.mkdirs()
         val orphan = File(directory, "jvm-0000000000000000-0000.json.tmp")
         orphan.writeText("half")
+        orphan.setLastModified(millis - 2 * staleWindow)
 
         store().record(Thread.currentThread(), RuntimeException("kept"))
 
@@ -104,10 +113,28 @@ class CrashStoreTest {
     }
 
     @Test
+    fun `a temp file a live write owns is not swept`() {
+        directory.mkdirs()
+        val inFlight = File(directory, "jvm-0000000000000000-0000.json.tmp")
+        inFlight.writeText("half")
+        // Modified on the clock the store reads, so this is a write happening
+        // right now — a crash landing while a drain is in flight.
+        inFlight.setLastModified(millis)
+
+        store().pending()
+
+        assertTrue(
+            inFlight.exists(),
+            "a drain must not delete a temp file a crash is still writing",
+        )
+        inFlight.delete()
+    }
+
+    @Test
     fun `a directory that cannot be written reports the failure to its caller`() {
         val blocker = File(directory.parentFile, "otel-zone-blocker-${System.nanoTime()}")
         blocker.writeText("not a directory")
-        val store = CrashStore(directory = blocker, nowMicros = { micros++ })
+        val store = CrashStore(directory = blocker, nowMillis = { millis++ })
 
         assertFailsWith<Exception> {
             store.record(Thread.currentThread(), RuntimeException("boom"))
