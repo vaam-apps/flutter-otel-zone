@@ -13,6 +13,13 @@
 #     `RecordingTalkerObserver` is for.
 #   * `dart format --set-exit-if-changed`, because a formatter that only runs
 #     on someone's laptop formats differently on the next one.
+#
+# A second job, `android`, covers the Kotlin, which none of the above touches.
+# The org-wide `lint.yml` checks .kt style and never compiles it, so before
+# this job a Kotlin file that did not build passed every gate in this
+# repository. That is not hypothetical: the first run of
+# `:otel_zone:testDebugUnitTest` failed outright, and then failed 7/11 on a
+# path bug that would have stopped every crash report from ever being written.
 name: ci
 
 on:
@@ -71,3 +78,57 @@ jobs:
 
       - name: Test
         run: flutter test
+
+  android:
+    name: kotlin unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # AGP 9 needs a JDK it can run on, and the runner's default is not a
+      # version this repository chose.
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # Sets ANDROID_HOME and accepts the licences, so AGP can fetch the
+      # platform and build-tools that compileSdk 36 asks for instead of
+      # failing on a component the image happens not to carry.
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: main
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      # The plugin is pulled into the example's Gradle build by the path
+      # dependency, and this is what writes .flutter-plugins-dependencies,
+      # which the Gradle settings read to find the module at all.
+      - name: Resolve
+        run: flutter pub get
+
+      - name: Resolve the example
+        working-directory: example
+        run: flutter pub get
+
+      # The wrapper is generated, not committed — Flutter's template ignores it
+      # — and the first attempt to commit it turned Super-linter red: shellcheck
+      # flags SC2006, SC2034 and SC2164 in Gradle's own gradlew, which is not
+      # ours to edit. Regenerating it here keeps the generated script out of the
+      # repository while still giving this job a ./gradlew to run.
+      - name: Generate the example's Gradle wrapper
+        working-directory: example
+        run: flutter create --platforms=android .
+
+      # Runs the module's own JVM tests, and compiles every .kt file on the
+      # way. Nothing else in this repository compiles them.
+      - name: Kotlin unit tests
+        working-directory: example/android
+        run: ./gradlew :otel_zone:testDebugUnitTest --console=plain
