@@ -3,7 +3,8 @@ import 'dart:isolate';
 
 import 'package:dartastic_opentelemetry/dartastic_opentelemetry.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart' show NavigatorObserver;
+import 'package:flutter/widgets.dart'
+    show AppLifecycleListener, NavigatorObserver;
 import 'package:otel_go_router/otel_go_router.dart';
 import 'package:otel_riverpod/otel_riverpod.dart';
 import 'package:riverpod/riverpod.dart' show ProviderObserver;
@@ -79,6 +80,11 @@ class OtelZone {
   /// leaves the device.
   late final OtelBridge bridge;
 
+  /// The lifecycle hook that flushes the batch queue before the OS may kill
+  /// the process. `null` until the first [start], and stays `null` if there
+  /// is no binding to attach it to.
+  AppLifecycleListener? _lifecycle;
+
   /// Whether the SDK came up. `false` before [start], and after a [start]
   /// that failed.
   bool get isReady => bridge.ready;
@@ -115,6 +121,10 @@ class OtelZone {
     String? buildId,
     Map<String, String> resourceAttributes = const <String, String>{},
   }) async {
+    // The lifecycle hook is registered before the SDK is brought up, so that
+    // a failed [start] still leaves the (no-op) flush in place rather than
+    // silently changing the app's lifecycle wiring on a retry.
+    _watchLifecycle();
     try {
       await OTel.initialize(
         serviceName: config.serviceName,
@@ -186,6 +196,47 @@ class OtelZone {
                   'fell back to ${config.exportFloor.level.name}'}';
   }
 
+  /// Flushes the OpenTelemetry logs pipeline.
+  ///
+  /// The batch processor holds records in memory for its scheduled delay, so
+  /// this is the one call that pushes a just-recorded fault towards the
+  /// collector. The lifecycle hook below calls it; it is also safe to call
+  /// on demand.
+  ///
+  /// Overridable so a test can count the flush without a live SDK — a real
+  /// `LoggerProvider` has no call counter, and "flushed" and "did not flush"
+  /// are otherwise indistinguishable from outside.
+  @protected
+  @visibleForTesting
+  Future<void> flushLogs() => OTel.loggerProvider().forceFlush();
+
+  /// Registers the one lifecycle hook this package needs: the moment the OS
+  /// may kill a backgrounded process with records still queued.
+  ///
+  /// Best-effort by design. Without a Flutter binding there is nothing to
+  /// attach to, and that must never be a reason [start] fails.
+  void _watchLifecycle() {
+    if (_lifecycle != null) return;
+    try {
+      _lifecycle = AppLifecycleListener(
+        onPause: _flushBeforeBackground,
+        onDetach: _flushBeforeBackground,
+      );
+    } on Object {
+      // No binding or no lifecycle channel: local logging still works, and
+      // telemetry must never be the reason an app cannot start.
+    }
+  }
+
+  /// Fire-and-forget: a lifecycle callback must not block, and telemetry is
+  /// never in the functional path. `safely` covers the SDK being down; the
+  /// `catchError` covers the flush rejecting asynchronously.
+  void _flushBeforeBackground() {
+    safely(() {
+      unawaited(flushLogs().catchError((Object _) {}));
+    });
+  }
+
   /// The single reporting entry point for an error the app caught itself.
   /// Safe to call from anywhere, including from inside an error handler.
   void reportError(Object error, StackTrace stackTrace, {String? context}) {
@@ -221,16 +272,39 @@ class OtelZone {
             details.stack ?? StackTrace.current,
             context: details.context?.toDescription(),
           );
+          // `presentFlutterErrors` alone decides whether the red screen and
+          // the console dump happen. Flutter's default `FlutterError.onError`
+          // *is* `presentError`, so chaining to it unconditionally makes the
+          // flag meaningless: it would present twice when on, and still once
+          // when off.
           if (config.presentFlutterErrors) {
             FlutterError.presentError(details);
           }
-          previousOnError?.call(details);
+          // A handler an app or plugin installed before `runGuarded` still
+          // runs. Only the default is skipped, because `presentError` above
+          // already does exactly what it would have done.
+          if (!identical(previousOnError, FlutterError.presentError)) {
+            previousOnError?.call(details);
+          }
         };
 
         // Errors that escape an engine callback (gesture handlers, platform
-        // channel replies) without passing through FlutterError.
+        // channel replies) without passing through FlutterError. Chained, not
+        // replaced: a handler installed before this point — by a plugin, or
+        // by the app itself — otherwise silently stops running.
+        final bool Function(Object, StackTrace)? previousPlatformOnError =
+            PlatformDispatcher.instance.onError;
         PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
           reportError(error, stack, context: 'PlatformDispatcher');
+          if (previousPlatformOnError != null) {
+            // A previous handler that throws must not cost the report above,
+            // nor propagate out of the engine callback.
+            try {
+              previousPlatformOnError(error, stack);
+            } on Object {
+              // Deliberately swallowed: the report has already been made.
+            }
+          }
           // `true` = handled; without it the engine also prints it, which
           // would double every record.
           return true;
