@@ -117,6 +117,38 @@ was given, and keeps what was written so `start()` can say so out loud. The
 direction of that fallback is deliberate: a misconfigured build that defaults
 to *loud* bills its users for the mistake.
 
+## Scrubbing what leaves the device
+
+Supply one `redact` function and every string an exported record carries is
+scrubbed by it: the message, the error/exception text, the stack trace, and
+each breadcrumb line. It runs *before* truncation and before the record
+reaches the exporter, so nothing unredacted can be persisted or sent.
+
+```dart
+final OtelZone observability = OtelZone(
+  OtelZoneConfig(
+    serviceName: 'my-app',
+    endpoint: Env.otelEndpoint,
+    redact: (input) => input
+        .replaceAll(RegExp(r'\d{9}'), '<phone>')
+        .replaceAll(RegExp(r'Bearer \S+'), 'Bearer <redacted>'),
+  ),
+);
+```
+
+It lives here, at the one point every record crosses, rather than at each call
+site: a rule bolted on per call site is a rule one call site eventually misses.
+
+What it does **not** touch:
+
+- **Resource attributes.** They are set by the app at `start()` and are not
+  records; give them already-scrubbed values.
+- **`talker.history`.** The redacted copy is what goes to the sink; the
+  original record stays on the device, where it is not a disclosure.
+
+A `redact` that throws drops the record instead of letting it through
+unredacted — it fails closed, and it never throws into the app.
+
 ## Telemetry never blocks the app
 
 Two rules, and both are load-bearing rather than defensive dressing.
@@ -182,7 +214,8 @@ final sink = RecordingTalkerObserver();
 final zone = OtelZone(config, sink: sink);
 ```
 
-`flutter test` in this repository is 40 such tests and needs no device.
+`flutter test` in this repository is the whole contract above — the floor, the
+breadcrumbs, the redaction and the start-up summary — and needs no device.
 
 ## Licence
 

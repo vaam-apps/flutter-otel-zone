@@ -2,6 +2,19 @@ import 'package:flutter/foundation.dart' show kDebugMode;
 
 import 'export-floor.dart';
 
+/// One function that scrubs a single string of anything that must not leave
+/// the device.
+///
+/// It is applied to every exported record's message, error/exception text,
+/// stack trace, and each breadcrumb line — the whole of what an
+/// `OTelTalkerObserver` puts on the wire.
+///
+/// ```dart
+/// String scrubPhoneNumbers(String input) =>
+///     input.replaceAll(RegExp(r'\d{9}'), '<phone>');
+/// ```
+typedef Redactor = String Function(String input);
+
 /// Everything about a build's telemetry that is known before the build
 /// runs.
 ///
@@ -40,6 +53,7 @@ final class OtelZoneConfig {
     this.exportFloor = const ExportFloor.of(ExportFloor.defaultLevel),
     this.breadcrumbCount = 12,
     this.breadcrumbLineLimit = 160,
+    this.redact,
     this.useConsoleLogs = kDebugMode,
     this.presentFlutterErrors = kDebugMode,
     this.enableLogs = true,
@@ -91,6 +105,22 @@ final class OtelZoneConfig {
   /// Breadcrumb lines are truncated to this, so one enormous value cannot
   /// turn a fault into a payload.
   final int breadcrumbLineLimit;
+
+  /// Scrubs every exported string before it leaves the device.
+  ///
+  /// This is the one point every record crosses, which is why scrubbing lives
+  /// here and not at each call site: a rule bolted on per call site is a rule
+  /// that one call site eventually misses. It runs *before* truncation and
+  /// before any export, so nothing unredacted can be persisted or sent.
+  ///
+  /// `null` means no scrubbing — the behaviour of every build that does not
+  /// supply one. A [redact] that throws drops the record rather than letting
+  /// it through unredacted (fail closed).
+  ///
+  /// ```dart
+  /// redact: (input) => input.replaceAll(RegExp(r'\d{9}'), '<phone>'),
+  /// ```
+  final Redactor? redact;
 
   /// Whether Talker prints to the console.
   ///
