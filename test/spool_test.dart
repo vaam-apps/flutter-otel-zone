@@ -120,6 +120,21 @@ void main() {
       expect(_spoolFiles(directory), hasLength(1));
     });
 
+    test('an orphaned temp file is reclaimed on the next spool', () async {
+      // What a process death between write and rename leaves behind: a file
+      // no `.spool.json` scan would ever see, so no cap would ever remove it.
+      final File orphan = File(
+        '${directory.path}/0000000000000001-0.spool.json.tmp',
+      );
+      await orphan.writeAsString('{"half":');
+
+      await spool.export(<ReadableLogRecord>[_record()]);
+
+      expect(orphan.existsSync(), isFalse);
+      expect(_spoolFiles(directory), hasLength(1));
+      expect(_spoolFiles(directory).single.path, endsWith('.spool.json'));
+    });
+
     test('an empty batch is neither delegated nor written', () async {
       final ExportResult result = await spool.export(<ReadableLogRecord>[]);
 
