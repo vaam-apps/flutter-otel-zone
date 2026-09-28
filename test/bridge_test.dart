@@ -309,6 +309,25 @@ void main() {
       expect(sink.records[1].title, 'provider <phone>');
     });
 
+    test('a record carrying both an error and an exception is not dropped', () {
+      final RecordingTalkerObserver sink = RecordingTalkerObserver();
+      final OtelBridge bridge = redactingWith(sink: sink, redact: scrub);
+
+      bridge.onLog(
+        TalkerData(
+          'both 699887766',
+          logLevel: LogLevel.warning,
+          error: StateError('err 699887766'),
+          exception: Exception('ex 699887766'),
+        ),
+      );
+
+      final TalkerData record = sink.records.single;
+      expect(record.message, 'both <phone>');
+      expect(record.error.toString(), contains('<phone>'));
+      expect(record.exception.toString(), contains('<phone>'));
+    });
+
     test('a throwing redactor drops the record and does not throw', () {
       final RecordingTalkerObserver sink = RecordingTalkerObserver();
       final OtelBridge bridge = redactingWith(

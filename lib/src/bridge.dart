@@ -173,23 +173,26 @@ class OtelBridge extends TalkerObserver {
     final Redactor? redact = this.redact;
     if (redact == null) return data;
     try {
-      final Object? fault = data.error ?? data.exception;
-      final Object? redactedFault = fault == null
+      // The two fault fields are scrubbed independently: a record may carry
+      // both, and deriving one wrapper from `error ?? exception` would then
+      // cast it to the other type and drop the whole record.
+      final Error? error = data.error == null
           ? null
-          : data.error != null
-          ? _RedactedError(
-              fault.runtimeType.toString(),
-              redact(fault.toString()),
-            )
+          : _RedactedError(
+              data.error!.runtimeType.toString(),
+              redact(data.error!.toString()),
+            );
+      final Object? exception = data.exception == null
+          ? null
           : _RedactedException(
-              fault.runtimeType.toString(),
-              redact(fault.toString()),
+              data.exception!.runtimeType.toString(),
+              redact(data.exception!.toString()),
             );
       return TalkerData(
         redact(data.message ?? ''),
         logLevel: data.logLevel,
-        error: data.error != null ? redactedFault as Error : null,
-        exception: data.exception != null ? redactedFault as Exception : null,
+        error: error,
+        exception: exception,
         stackTrace: data.stackTrace == null
             ? null
             : _RedactedStackTrace(redact(data.stackTrace.toString())),
