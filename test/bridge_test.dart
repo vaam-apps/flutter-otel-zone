@@ -290,6 +290,25 @@ void main() {
       expect(line, isNot(contains('699887766')));
     });
 
+    test('the record title is scrubbed too', () {
+      final RecordingTalkerObserver sink = RecordingTalkerObserver();
+      final OtelBridge bridge = redactingWith(sink: sink, redact: scrub);
+
+      bridge.onLog(
+        TalkerData(
+          'offline',
+          logLevel: LogLevel.warning,
+          title: 'route 699887766',
+        ),
+      );
+      bridge.onError(
+        TalkerError(StateError('boom'), title: 'provider 699887766'),
+      );
+
+      expect(sink.records[0].title, 'route <phone>');
+      expect(sink.records[1].title, 'provider <phone>');
+    });
+
     test('a throwing redactor drops the record and does not throw', () {
       final RecordingTalkerObserver sink = RecordingTalkerObserver();
       final OtelBridge bridge = redactingWith(

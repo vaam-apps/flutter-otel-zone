@@ -5,8 +5,8 @@ import 'export-floor.dart';
 /// One function that scrubs a single string of anything that must not leave
 /// the device.
 ///
-/// It is applied to every exported record's message, error/exception text,
-/// stack trace, and each breadcrumb line — the whole of what an
+/// It is applied to every exported record's message, title, error/exception
+/// text, stack trace, and each breadcrumb line — the whole of what an
 /// `OTelTalkerObserver` puts on the wire.
 ///
 /// ```dart

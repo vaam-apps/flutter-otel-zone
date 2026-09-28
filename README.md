@@ -13,12 +13,19 @@ each is in the doc comment next to it rather than here.
 
 Four things that are only correct together:
 
-| | |
-|---|---|
-| **The zone** | `runGuarded` wires all four of Flutter's uncaught-error channels — `FlutterError.onError`, `PlatformDispatcher.onError`, the zone's own handler and `Isolate.addErrorListener` — to one reporting function. Each has a different default and some swallow silently, so anything less than all four means a class of crash never reaches the logs. |
-| **The sink** | One `Talker`. Riverpod transitions, route changes, classified failures and uncaught errors all land on it, so there is no second reporting path to keep in sync. |
-| **The floor** | `OtelBridge` decides which of those records are worth the radio, and attaches the withheld ones to a fault as breadcrumbs. |
-| **The guard** | `safely()`, and the lazy observers. Every dartastic entry point resolves its tracer eagerly and throws when the SDK never started, so instrumentation that is not guarded takes features down with it. |
+- **The zone** — `runGuarded` wires all four of Flutter's uncaught-error
+  channels — `FlutterError.onError`, `PlatformDispatcher.onError`, the zone's
+  own handler and `Isolate.addErrorListener` — to one reporting function. Each
+  has a different default and some swallow silently, so anything less than all
+  four means a class of crash never reaches the logs.
+- **The sink** — One `Talker`. Riverpod transitions, route changes, classified
+  failures and uncaught errors all land on it, so there is no second reporting
+  path to keep in sync.
+- **The floor** — `OtelBridge` decides which of those records are worth the
+  radio, and attaches the withheld ones to a fault as breadcrumbs.
+- **The guard** — `safely()`, and the lazy observers. Every dartastic entry
+  point resolves its tracer eagerly and throws when the SDK never started, so
+  instrumentation that is not guarded takes features down with it.
 
 ## Install
 
@@ -120,9 +127,9 @@ to *loud* bills its users for the mistake.
 ## Scrubbing what leaves the device
 
 Supply one `redact` function and every string an exported record carries is
-scrubbed by it: the message, the error/exception text, the stack trace, and
-each breadcrumb line. It runs *before* truncation and before the record
-reaches the exporter, so nothing unredacted can be persisted or sent.
+scrubbed by it: the message, the title, the error/exception text, the stack
+trace, and each breadcrumb line. It runs *before* truncation and before the
+record reaches the exporter, so nothing unredacted can be persisted or sent.
 
 ```dart
 final OtelZone observability = OtelZone(

@@ -85,10 +85,10 @@ class OtelBridge extends TalkerObserver {
 
   /// Scrubs every exported record, or `null` for none.
   ///
-  /// Applied to the message, the error/exception text, the stack trace and
-  /// each breadcrumb line, before truncation and before the sink sees any of
-  /// it. A [redact] that throws drops the record instead of letting it
-  /// through (fail closed).
+  /// Applied to the message, the title, the error/exception text, the stack
+  /// trace and each breadcrumb line, before truncation and before the sink
+  /// sees any of it. A [redact] that throws drops the record instead of
+  /// letting it through (fail closed).
   final Redactor? redact;
 
   final TalkerObserver _sink;
@@ -193,7 +193,7 @@ class OtelBridge extends TalkerObserver {
         stackTrace: data.stackTrace == null
             ? null
             : _RedactedStackTrace(redact(data.stackTrace.toString())),
-        title: data.title,
+        title: data.title == null ? null : redact(data.title!),
         time: data.time,
         key: data.key,
       );
