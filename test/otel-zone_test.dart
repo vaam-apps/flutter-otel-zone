@@ -6,6 +6,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleState, WidgetsBinding;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otel_zone/otel_zone.dart';
 import 'package:talker/talker.dart';
@@ -20,6 +21,17 @@ const OtelZoneConfig _config = OtelZoneConfig(
 
 OtelZone zone([OtelZoneConfig config = _config]) =>
     OtelZone(config, sink: RecordingTalkerObserver());
+
+/// An [OtelZone] whose flush is counted rather than sent, so the lifecycle
+/// hook is assertable without a live SDK.
+class _FlushingZone extends OtelZone {
+  _FlushingZone() : super(_config, sink: RecordingTalkerObserver());
+
+  int flushes = 0;
+
+  @override
+  Future<void> flushLogs() async => flushes++;
+}
 
 void main() {
   group('configuration', () {
@@ -261,5 +273,183 @@ void main() {
 
       expect(finished, isTrue);
     });
+  });
+
+  group('the framework-error channel (ticket #4)', () {
+    // Flutter's default `FlutterError.onError` *is* `FlutterError.presentError`
+    // (`static FlutterExceptionHandler presentError = dumpErrorToConsole`), so
+    // `presentError` is a reassignable field. Pointing both `onError` and
+    // `presentError` at the same spy makes "the default handler" countable.
+    test('presentFlutterErrors: false never presents an error', () async {
+      final OtelZone subject = zone();
+      final FlutterExceptionHandler? outerOnError = FlutterError.onError;
+      final FlutterExceptionHandler outerPresent = FlutterError.presentError;
+      var presented = 0;
+      void spy(FlutterErrorDetails details) => presented++;
+      FlutterError.onError = spy;
+      FlutterError.presentError = spy;
+      addTearDown(() {
+        FlutterError.onError = outerOnError;
+        FlutterError.presentError = outerPresent;
+      });
+
+      await subject.runGuarded(() async {
+        FlutterError.onError!(
+          FlutterErrorDetails(exception: StateError('a build failed')),
+        );
+      });
+
+      expect(presented, 0, reason: 'with the flag off, nothing may present');
+    });
+
+    test('presentFlutterErrors: true presents exactly once', () async {
+      final OtelZone subject = zone(
+        const OtelZoneConfig(
+          serviceName: 'test-app',
+          endpoint: 'http://127.0.0.1:4318',
+          useConsoleLogs: false,
+          presentFlutterErrors: true,
+        ),
+      );
+      final FlutterExceptionHandler? outerOnError = FlutterError.onError;
+      final FlutterExceptionHandler outerPresent = FlutterError.presentError;
+      var presented = 0;
+      void spy(FlutterErrorDetails details) => presented++;
+      FlutterError.onError = spy;
+      FlutterError.presentError = spy;
+      addTearDown(() {
+        FlutterError.onError = outerOnError;
+        FlutterError.presentError = outerPresent;
+      });
+
+      await subject.runGuarded(() async {
+        FlutterError.onError!(
+          FlutterErrorDetails(exception: StateError('a build failed')),
+        );
+      });
+
+      expect(
+        presented,
+        1,
+        reason: 'the default handler must not present a second copy',
+      );
+    });
+
+    test('a custom previous handler still runs once', () async {
+      final OtelZone subject = zone();
+      final FlutterExceptionHandler? outer = FlutterError.onError;
+      var previousCalls = 0;
+      FlutterError.onError = (FlutterErrorDetails details) => previousCalls++;
+      addTearDown(() => FlutterError.onError = outer);
+
+      await subject.runGuarded(() async {
+        FlutterError.onError!(
+          FlutterErrorDetails(exception: StateError('a build failed')),
+        );
+      });
+
+      expect(previousCalls, 1);
+    });
+  });
+
+  group('the platform-dispatcher channel (ticket #5)', () {
+    test('a handler installed before runGuarded still runs', () async {
+      final OtelZone subject = zone();
+      final bool Function(Object, StackTrace)? outer =
+          PlatformDispatcher.instance.onError;
+      var previousCalls = 0;
+      PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
+        previousCalls++;
+        return true;
+      };
+      addTearDown(() => PlatformDispatcher.instance.onError = outer);
+
+      bool? handled;
+      await subject.runGuarded(() async {
+        handled = PlatformDispatcher.instance.onError!(
+          StateError('escaped the engine'),
+          StackTrace.current,
+        );
+      });
+
+      expect(handled, isTrue);
+      expect(previousCalls, 1);
+      expect(
+        subject.talker.history.any(
+          (TalkerData entry) =>
+              entry.error?.toString().contains('escaped the engine') ?? false,
+        ),
+        isTrue,
+      );
+    });
+
+    test(
+      'a previous handler that throws does not suppress the report',
+      () async {
+        final OtelZone subject = zone();
+        final bool Function(Object, StackTrace)? outer =
+            PlatformDispatcher.instance.onError;
+        PlatformDispatcher.instance.onError =
+            (Object error, StackTrace stack) =>
+                throw StateError('the previous handler exploded');
+        addTearDown(() => PlatformDispatcher.instance.onError = outer);
+
+        Object? thrown;
+        await subject.runGuarded(() async {
+          try {
+            PlatformDispatcher.instance.onError!(
+              StateError('escaped the engine'),
+              StackTrace.current,
+            );
+          } on Object catch (error) {
+            thrown = error;
+          }
+        });
+
+        expect(thrown, isNull, reason: 'a chained handler must not propagate');
+        expect(
+          subject.talker.history.any(
+            (TalkerData entry) =>
+                entry.error?.toString().contains('escaped the engine') ?? false,
+          ),
+          isTrue,
+        );
+      },
+    );
+  });
+
+  group('the lifecycle flush (ticket #6)', () {
+    test('a paused app force-flushes the logs pipeline once', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final _FlushingZone subject = _FlushingZone();
+      // `start` registers the lifecycle hook; the empty version fails fast, so
+      // the SDK never comes up — readiness is then set by hand.
+      await subject.start(serviceVersion: '');
+      subject.bridge.ready = true;
+
+      WidgetsBinding.instance.handleAppLifecycleStateChanged(
+        AppLifecycleState.paused,
+      );
+
+      expect(subject.flushes, 1);
+    });
+
+    test(
+      'pausing with the SDK down flushes nothing and does not throw',
+      () async {
+        TestWidgetsFlutterBinding.ensureInitialized();
+        final _FlushingZone subject = _FlushingZone();
+        await subject.start(serviceVersion: '');
+        expect(subject.isReady, isFalse);
+
+        expect(
+          () => WidgetsBinding.instance.handleAppLifecycleStateChanged(
+            AppLifecycleState.paused,
+          ),
+          returnsNormally,
+        );
+        expect(subject.flushes, 0);
+      },
+    );
   });
 }
