@@ -52,9 +52,13 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   static const String replayedAttribute = 'otel_zone.replayed';
 
   static const String _suffix = '.spool.json';
+  static const String _tempSuffix = '.tmp';
 
   /// Distinguishes two batches written in the same microsecond.
   static int _sequence = 0;
+
+  /// Temp files this instance is currently writing.
+  final Set<String> _writing = <String>{};
 
   /// Exports [logRecords], spooling them if the delegate refuses them.
   ///
@@ -128,17 +132,28 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
       // Temp file + rename, so a process death mid-write leaves either the
       // previous state or a complete batch — never half a JSON document that
       // replay would have to understand.
-      final File temp = File('${target.path}.tmp');
-      await temp.writeAsString(_encode(logRecords), flush: true);
-      await temp.rename(target.path);
+      final File temp = File('${target.path}$_tempSuffix');
+      // Tracked so the sweep can tell an in-flight write from one a dead
+      // process left behind.
+      _writing.add(temp.path);
+      try {
+        await temp.writeAsString(_encode(logRecords), flush: true);
+        await temp.rename(target.path);
+      } finally {
+        _writing.remove(temp.path);
+      }
       await _evict();
       return true;
     } on Object {
+      // A write that failed part-way leaves its temp behind, so reclaim it
+      // now rather than waiting for the next successful spool.
+      await _sweepTemps();
       return false;
     }
   }
 
   Future<void> _evict() async {
+    await _sweepTemps();
     final List<File> files = await _oldestFirst();
     if (files.length > maxBatches) {
       for (final File file in files.take(files.length - maxBatches)) {
@@ -153,6 +168,28 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
       if (written != null && now.difference(written) > age) {
         await _delete(file);
       }
+    }
+  }
+
+  /// Deletes temp files no live write owns.
+  ///
+  /// A `.tmp` file is only visible here because a process died between write
+  /// and rename, or because a write failed part-way — a healthy write renames
+  /// immediately. Without this they accumulate forever: neither [_evict] nor
+  /// [replay] looks at anything but `*.spool.json`, so the caps would never
+  /// see them.
+  Future<void> _sweepTemps() async {
+    try {
+      if (!await directory.exists()) return;
+      await for (final FileSystemEntity entity in directory.list()) {
+        if (entity is File &&
+            entity.path.endsWith(_tempSuffix) &&
+            !_writing.contains(entity.path)) {
+          await _delete(entity);
+        }
+      }
+    } on Object {
+      // Nothing useful to do.
     }
   }
 
