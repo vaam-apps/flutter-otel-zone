@@ -45,3 +45,19 @@ dev_dependencies:
   flutter_lints: ^6.0.0
   flutter_test:
     sdk: flutter
+  # Generates `NativeCrashApi` — the Dart client, the Kotlin interface and the
+  # Swift protocol — from `pigeons/native_crash.dart`. A dev dependency: the
+  # generated output is committed, so building the app does not need it.
+  pigeon: ^29.0.4
+
+flutter:
+  # The crash-capture channel needs native code on both platforms, which makes
+  # this a plugin rather than a plain package. Android and iOS only: web has no
+  # process to have died, and desktop is not a target.
+  plugin:
+    platforms:
+      android:
+        package: com.vaam.otel_zone
+        pluginClass: OtelZonePlugin
+      ios:
+        pluginClass: OtelZonePlugin

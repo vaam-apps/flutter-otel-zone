@@ -191,6 +191,43 @@ await observability.start(serviceVersion: '1.2.3');
   version that crashed rather than whichever one was running when it was
   finally delivered. Replayed records carry `otel_zone.replayed = true`.
 
+## Native crashes
+
+A native crash kills the process before Dart can see it, so the platforms read
+the OS's own record of the death — `ApplicationExitInfo` on Android, MetricKit
+on iOS — and hand it to Dart over one Pigeon channel. `start()` drains it:
+
+```text
+pending() -> redact -> FATAL LogRecord -> spool -> acknowledge
+```
+
+- **FATAL, and not a breadcrumb.** A recovered crash is emitted straight onto
+  the export path as a `Severity.FATAL` record with `event.name` of
+  `device.crash` or `device.anr`; it does not go through `Talker` and is not
+  gated by `exportFloor`. A record of the process dying is not something the
+  live-app floor gets to drop.
+- **Acknowledged only when durable.** The reports are acknowledged only after
+  the exporter has accepted the batch, so an offline phone re-reads them on the
+  next launch rather than dropping them. With `spoolDirectory` set they are on
+  disk first; without it they go straight to the collector.
+- **Redacted like everything else.** `redact` is applied to the message, the
+  stack trace and the attributes, because a native stack is the densest PII the
+  package ever handles. A redactor that throws drops the report rather than
+  exporting it raw.
+- **Web is a no-op**, and a platform read that fails is one warning on the
+  talker, never a thrown error.
+
+The platform side ships as a no-op in this version: the channel exists and the
+Dart drain is complete, but the Android and iOS handlers that actually read the
+OS records land in their own tickets. That is what lets the contract be tested
+today — `NativeCrashSource` is the seam.
+
+The channel is generated, not written by hand:
+
+```bash
+dart run pigeon --input pigeons/native_crash.dart && dart format .
+```
+
 ## Telemetry never blocks the app
 
 Two rules, and both are load-bearing rather than defensive dressing.
