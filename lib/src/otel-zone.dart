@@ -13,6 +13,7 @@ import 'package:talker/talker.dart';
 
 import 'bridge.dart';
 import 'config.dart';
+import 'native-crash.dart';
 import 'spool.dart';
 
 /// One `Talker`, one OpenTelemetry SDK, and one guarded zone that funnels
@@ -49,7 +50,16 @@ class OtelZone {
   /// [talker] and [sink] are injection points for tests. A caller that
   /// supplies its own [talker] is responsible for having given it this
   /// object's [bridge] as an observer.
-  OtelZone(this.config, {Talker? talker, TalkerObserver? sink}) {
+  ///
+  /// [nativeCrashSource] is the previous run's crash reports. It defaults to
+  /// the plugin's Pigeon channel, and is an injection point so the drain can
+  /// be tested without a device.
+  OtelZone(
+    this.config, {
+    Talker? talker,
+    TalkerObserver? sink,
+    NativeCrashSource? nativeCrashSource,
+  }) : _nativeCrashSource = nativeCrashSource ?? PigeonNativeCrashSource() {
     bridge = OtelBridge(
       floor: config.exportFloor,
       // Read lazily: the trail is this object's own Talker, which does not
@@ -87,6 +97,8 @@ class OtelZone {
   /// the process. `null` until the first [start], and stays `null` if there
   /// is no binding to attach it to.
   AppLifecycleListener? _lifecycle;
+
+  final NativeCrashSource _nativeCrashSource;
 
   /// Whether the SDK came up. `false` before [start], and after a [start]
   /// that failed.
@@ -161,9 +173,31 @@ class OtelZone {
       // Only now may the bridge forward: `OTel.loggerProvider()` throws
       // until initialize() has returned successfully.
       bridge.ready = true;
+
+      // Recovered before the summary, so the line can report it. An empty
+      // `pending()` is a local call, so this only reaches the network when
+      // the OS actually held a record from the last run.
+      int nativeCrashes = 0;
+      if (config.enableLogs) {
+        final LogRecordExporter crashExporter =
+            spool ??
+            OtlpHttpLogRecordExporter(
+              OtlpHttpLogRecordExporterConfig(endpoint: config.endpoint),
+            );
+        nativeCrashes = await NativeCrashDrain(
+          source: _nativeCrashSource,
+          exporter: crashExporter,
+          loggerName: config.loggerName,
+          redact: config.redact,
+          onWarning: talker.warning,
+        ).drain();
+      }
+
       final SpoolingLogRecordExporter? exporter = spool;
       if (exporter == null) {
-        talker.warning(startupSummary(serviceVersion, buildId));
+        talker.warning(
+          startupSummary(serviceVersion, buildId, nativeCrashes: nativeCrashes),
+        );
       } else {
         // Replay reaches for the network, and `start` is awaited before
         // `runApp`, so it cannot be on that path. The summary does wait for
@@ -173,11 +207,22 @@ class OtelZone {
               .replay()
               .then(
                 (int replayed) => talker.warning(
-                  startupSummary(serviceVersion, buildId, replayed: replayed),
+                  startupSummary(
+                    serviceVersion,
+                    buildId,
+                    replayed: replayed,
+                    nativeCrashes: nativeCrashes,
+                  ),
                 ),
               )
               .catchError((Object _) {
-                talker.warning(startupSummary(serviceVersion, buildId));
+                talker.warning(
+                  startupSummary(
+                    serviceVersion,
+                    buildId,
+                    nativeCrashes: nativeCrashes,
+                  ),
+                );
               }),
         );
       }
@@ -225,22 +270,31 @@ class OtelZone {
   /// on this launch, and is `null` when nothing is spooled. It is part of the
   /// line rather than a line of its own because "did the backlog drain" is
   /// answered by the same reader who asks "is this build exporting".
+  ///
+  /// [nativeCrashes] is the count of native deaths recovered from the previous
+  /// run, and is likewise omitted when there were none.
   String startupSummary(
     String serviceVersion,
     String? buildId, {
     int? replayed,
+    int? nativeCrashes,
   }) {
     final String environment = config.deploymentEnvironmentName == null
         ? ''
         : ' (${config.deploymentEnvironmentName})';
     final String build = buildId == null ? '' : ' build $buildId';
+    final String recovered = nativeCrashes == null || nativeCrashes == 0
+        ? ''
+        : ', recovered $nativeCrashes native '
+              '${nativeCrashes == 1 ? 'crash' : 'crashes'}';
     final String spooled = replayed == null
         ? ''
         : ', replayed $replayed spooled ${replayed == 1 ? 'batch' : 'batches'}';
     final String? unrecognised = config.exportFloor.unrecognised;
     return 'OpenTelemetry: exporting to ${config.endpoint} '
         'as ${config.serviceName} $serviceVersion$build$environment, '
-        'records at ${config.exportFloor.level.name} and above$spooled'
+        'records at ${config.exportFloor.level.name} and above'
+        '$recovered$spooled'
         '${unrecognised == null ? '' : ' — the configured export level said '
                   '"$unrecognised", which is not a level; '
                   'fell back to ${config.exportFloor.level.name}'}';

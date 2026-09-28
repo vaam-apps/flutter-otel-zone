@@ -133,6 +133,20 @@ void main() {
       );
     });
 
+    test('reports how many native crashes were recovered', () {
+      expect(
+        zone().startupSummary('1.2.3', null, nativeCrashes: 1),
+        endsWith('records at warning and above, recovered 1 native crash'),
+      );
+      expect(
+        zone().startupSummary('1.2.3', null, replayed: 1, nativeCrashes: 2),
+        endsWith(
+          'records at warning and above, recovered 2 native crashes, '
+          'replayed 1 spooled batch',
+        ),
+      );
+    });
+
     test('an unreadable export level reports itself', () {
       final OtelZone typo = zone(
         OtelZoneConfig(
