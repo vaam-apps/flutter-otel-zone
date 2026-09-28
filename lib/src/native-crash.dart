@@ -98,18 +98,22 @@ class NativeCrashDrain {
     if (reports == null || reports.isEmpty) return 0;
 
     final List<ReadableLogRecord> records = <ReadableLogRecord>[];
+    // Only the reports that made a record. One whose redactor threw is
+    // dropped rather than exported raw, and a dropped report must not be
+    // acknowledged — its OS record has to stay readable for the next launch.
+    final List<String> delivered = <String>[];
     for (final NativeCrashReport report in reports) {
       final ReadableLogRecord? record = _toLogRecord(report);
-      if (record != null) records.add(record);
+      if (record == null) continue;
+      records.add(record);
+      delivered.add(report.id);
     }
     if (records.isEmpty) return 0;
 
     if (await _export(records) != ExportResult.success) return 0;
 
     try {
-      await source.acknowledge(
-        reports.map((NativeCrashReport report) => report.id).toList(),
-      );
+      await source.acknowledge(delivered);
     } on Object catch (error) {
       // The records are durable but the platform does not know it, so they
       // will be read again and re-exported. A duplicate is better than a

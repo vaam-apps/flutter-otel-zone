@@ -267,4 +267,31 @@ void main() {
       expect(source.acknowledged, isEmpty);
     },
   );
+
+  test(
+    'a dropped report is not acknowledged alongside a delivered one',
+    () async {
+      final _FakeSource source = _FakeSource(<NativeCrashReport>[
+        _report(id: 'kept'),
+        _report(id: 'dropped', message: 'secret token'),
+      ]);
+      final _RecordingExporter exporter = _RecordingExporter();
+
+      expect(
+        await drain(
+          source,
+          exporter,
+          redact: (String input) =>
+              input.contains('secret') ? throw StateError('bad rule') : input,
+        ).drain(),
+        1,
+      );
+      expect(exporter.batches.single, hasLength(1));
+      // Acknowledging the dropped report would mark its OS record delivered
+      // and lose the crash, which is worse than losing the export.
+      expect(source.acknowledged, <List<String>>[
+        <String>['kept'],
+      ]);
+    },
+  );
 }
