@@ -66,5 +66,12 @@ dependencies {
     // The Pigeon-generated handler holds suspend functions, which need
     // coroutines on the classpath.
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // Installs the crash handler before Application.onCreate without the app
+    // writing a line.
+    implementation("androidx.startup:startup-runtime:1.1.1")
     testImplementation("org.jetbrains.kotlin:kotlin-test")
+    // android.jar's org.json is a stub that throws in unit tests; the real
+    // implementation has to be on the test classpath for CrashStore's JSON to
+    // be exercised at all.
+    testImplementation("org.json:json:20240303")
 }
