@@ -62,7 +62,11 @@ internal class CrashStore(
             .put("attributes", JSONObject().put("thread.name", thread.name))
 
         val target = File(directory, "$id$SUFFIX")
-        val temp = File(directory, "${target.path}$TEMP_SUFFIX")
+        // Built from the directory, not from target.path: File(parent, child)
+        // makes an absolute child relative to the parent, so passing the
+        // target's own path here would nest the whole path under the
+        // directory instead of writing beside it.
+        val temp = File(directory, "$id$SUFFIX$TEMP_SUFFIX")
         temp.writeText(report.toString())
         if (!temp.renameTo(target)) {
             temp.delete()
