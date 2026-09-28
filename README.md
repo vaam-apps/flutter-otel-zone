@@ -156,6 +156,41 @@ What it does **not** touch:
 A `redact` that throws drops the record instead of letting it through
 unredacted — it fails closed, and it never throws into the app.
 
+## Faults recorded offline
+
+A batch the collector refuses is retried in memory and then dropped. Point
+`spoolDirectory` at app-private storage and it is written to disk instead, and
+replayed on the next `start()`:
+
+```dart
+final OtelZone observability = OtelZone(
+  OtelZoneConfig(
+    serviceName: 'my-app',
+    endpoint: Env.otelEndpoint,
+    // `getApplicationSupportDirectory` from `path_provider`, read after the
+    // binding exists.
+    spoolDirectory: getApplicationSupportDirectory,
+  ),
+);
+
+await observability.start(serviceVersion: '1.2.3');
+```
+
+- **Write-ahead.** The exporter is tried first, so a healthy collector never
+  pays for a disk write. Only a refused batch is spooled, and it is written to
+  a temp file and renamed, so a process death leaves a whole batch or none.
+- **Deleted on acceptance.** A file is removed only once the collector has
+  taken it. `start()` replays oldest first and stops at the first refusal,
+  keeping that file and the rest for the launch after.
+- **Bounded.** `spoolMaxBatches` (default 32) evicts the oldest file past the
+  cap and `spoolMaxAge` (default 7 days) drops files past their age; a phone
+  that never reconnects must not fill its disk with telemetry nobody collected.
+- **Failure is not fatal.** An unwritable directory falls back to the plain
+  exporter's own result, and nothing is thrown into the app.
+- **The original resource rides along**, so a crash stays filed under the
+  version that crashed rather than whichever one was running when it was
+  finally delivered. Replayed records carry `otel_zone.replayed = true`.
+
 ## Telemetry never blocks the app
 
 Two rules, and both are load-bearing rather than defensive dressing.
