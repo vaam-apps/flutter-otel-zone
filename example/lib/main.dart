@@ -29,8 +29,9 @@ final OtelZone observability = OtelZone(
     // collector has answered. Without a spool it is acknowledged only after
     // the collector accepts it, which leaves a window in which a relaunch
     // reports it twice. `getApplicationSupportDirectory` from `path_provider`
-    // is the right home in a real app; the cache directory keeps this example
-    // free of the dependency.
+    // is the right home in a real app, passed as it is (it returns a
+    // `Future<Directory>`, which `spoolDirectory` accepts); the temp directory
+    // keeps this example free of the dependency.
     spoolDirectory: () => Directory('${Directory.systemTemp.path}/otel-zone'),
     // Read from somewhere untyped, so a typo has to report itself rather
     // than quietly change what this build sends.
