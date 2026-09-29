@@ -12,6 +12,8 @@
 import 'package:flutter/material.dart';
 import 'package:otel_zone/otel_zone.dart';
 
+import 'crash-harness.dart';
+
 final OtelZone observability = OtelZone(
   OtelZoneConfig(
     serviceName: 'otel-zone-example',
@@ -80,6 +82,8 @@ class ExampleApp extends StatelessWidget {
                 onPressed: () => throw StateError('Something impossible'),
                 child: const Text('Throw'),
               ),
+              const SizedBox(height: 16),
+              const CrashHarnessPanel(),
             ],
           ),
         ),

@@ -1,0 +1,8 @@
+#include "Generated.xcconfig"
+
+// The crash harness in Runner/AppDelegate.swift is guarded by `#if DEBUG`, and
+// Flutter's Xcode template does not define DEBUG for the Runner target (it only
+// does for RunnerTests). Without this line the guard would be false in every
+// configuration and the harness would silently never exist. Release and Profile
+// xcconfigs do not carry it, which is what keeps the harness out of them.
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) DEBUG

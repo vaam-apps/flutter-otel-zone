@@ -1,0 +1,119 @@
+# Proves native crash capture on a real Android runtime.
+#
+# The Kotlin unit tests in `ci.yml` check the pieces; this checks that a process
+# which really dies — an uncaught exception, a SIGSEGV, an ANR — is drained
+# exactly once on the next launch and not again after that. It exists because
+# that behaviour is the OS's, not ours: `ApplicationExitInfo`, tombstones and
+# the ANR path change between Android releases, and only a device notices.
+#
+# Flutter's `integration_test` cannot run this, because the test runner is the
+# process that dies. `tool/android-crash-harness.dart` drives the device from
+# the host instead (see its header, and the README's "Crash harness" section).
+#
+# API 30 and API 34, because they differ where it matters: API 30 has
+# `ApplicationExitInfo` but no tombstone stream (that arrives in 31); API 34 has
+# both.
+#
+# It runs on every pull request. If it proves too slow or too flaky for that,
+# the `pull_request` trigger is the thing to drop: the nightly schedule and
+# `workflow_dispatch` keep the coverage.
+name: crash-harness
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: crash-harness-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The same pin as ci.yml; see the note there.
+  FLUTTER_VERSION: "3.48.0-0.4.pre"
+  # The example is built to export here, and the harness listens on it. The
+  # emulator reaches the runner's loopback through `adb reverse`.
+  OTEL_PORT: "4421"
+
+jobs:
+  android:
+    name: android crash harness (API ${{ matrix.api-level }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [30, 34]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: main
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      # Hardware acceleration for the emulator; without it x86_64 images are
+      # unusably slow. This is the action's own documented recipe.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Resolve
+        run: flutter pub get
+
+      - name: Resolve the example
+        working-directory: example
+        run: flutter pub get
+
+      # The Gradle wrapper is generated, not committed; see ci.yml.
+      - name: Generate the example's Gradle wrapper
+        working-directory: example
+        run: flutter create --platforms=android .
+
+      # Built before the emulator starts, so the emulator is not idle through
+      # a Gradle build.
+      - name: Build the example (debug)
+        working-directory: example
+        run: flutter build apk --debug --dart-define=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:${{ env.OTEL_PORT }}
+
+      - name: Build the example (release), for the refusal check
+        working-directory: example
+        run: flutter build apk --release --dart-define=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:${{ env.OTEL_PORT }}
+
+      # One emulator boot for everything: the host-driven crashes, the
+      # release-build refusal, and last the in-app channel test — last because
+      # `flutter test` rebuilds the debug APK without the endpoint define, and
+      # the harness's `--no-build` runs must use the ones built above. Each line
+      # runs as its own command, and the step fails on the first one that does.
+      - name: Crash, relaunch, drain
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            dart run tool/android-crash-harness.dart --no-build --kinds jvm,native,anr --port ${{ env.OTEL_PORT }}
+            dart run tool/android-crash-harness.dart --no-build --release-refusal --port ${{ env.OTEL_PORT }}
+            cd example && flutter test integration_test -d emulator-5554
