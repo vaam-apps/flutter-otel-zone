@@ -243,7 +243,9 @@ a crash report on a bad connection never delays the first frame.
   stack trace and the attributes, because a native stack is the densest PII the
   package ever handles. A redactor that throws drops the report rather than
   exporting it raw.
-- **Web is a no-op**, and a platform read that fails is one warning on the
+- **Android and iOS only.** Web is a no-op, and desktop (macOS, Linux,
+  Windows) gets Dart-level capture only: the drain makes no platform call and
+  logs nothing there. A platform read that fails is one warning on the
   talker, never a thrown error.
 
 On Android both sources are live, and they are joined so a crash is one record:
