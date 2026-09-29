@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.1](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.3.0...v0.3.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* deliver a recovered native crash once when the activity is relaunched ([#37](https://github.com/vaam-apps/flutter-otel-zone/issues/37)) ([c316df7](https://github.com/vaam-apps/flutter-otel-zone/commit/c316df7909cd53c592511b58873c436c2dd904ee))
+* skip the native-crash drain on desktop ([#34](https://github.com/vaam-apps/flutter-otel-zone/issues/34)) ([9b2c9f0](https://github.com/vaam-apps/flutter-otel-zone/commit/9b2c9f08b559e21bfba5501e6c38259394e14f08)), closes [#33](https://github.com/vaam-apps/flutter-otel-zone/issues/33)
+* tag native crash records with the build that crashed ([#32](https://github.com/vaam-apps/flutter-otel-zone/issues/32)) ([91ea4ec](https://github.com/vaam-apps/flutter-otel-zone/commit/91ea4ec36aee29e639681fbdadb4e3e8269da6b2))
+
 ## [0.3.0](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.2.0...v0.3.0) (2026-09-29)
 
 
