@@ -117,6 +117,13 @@ jobs:
       # `flutter test` rebuilds the debug APK without the endpoint define, and
       # the harness's `--no-build` runs must use the ones built above. Each line
       # runs as its own command, and the step fails on the first one that does.
+      #
+      # No run is retried: a run that needs a retry is a defect (see #36, where
+      # a retry hid a crash exported twice). Two lines exist to measure that
+      # rather than hope: `native` twenty times over on API 34, and the
+      # recovery launch relaunched by the OS at several delays. The delays are
+      # spread over the seconds a slow runner takes to start the app, because
+      # the window they probe moves with the machine.
       - name: Crash, relaunch, drain
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
@@ -126,7 +133,21 @@ jobs:
           profile: pixel_6
           disable-animations: true
           script: |
-            dart run tool/android-crash-harness.dart --no-build --kinds jvm,native,anr --port ${{ env.OTEL_PORT }}
-            dart run tool/android-crash-harness.dart --no-build --kinds jvm,native --upgrade-apk ${{ runner.temp }}/app-1.0.1-2.apk --port ${{ env.OTEL_PORT }}
+            dart run tool/android-crash-harness.dart --no-build --kinds jvm,native,anr --log-dir ${{ github.workspace }}/harness-logs/kinds --port ${{ env.OTEL_PORT }}
+            dart run tool/android-crash-harness.dart --no-build --kinds jvm,native --upgrade-apk ${{ runner.temp }}/app-1.0.1-2.apk --log-dir ${{ github.workspace }}/harness-logs/upgrade --port ${{ env.OTEL_PORT }}
+            if [ "${{ matrix.api-level }}" = "34" ]; then dart run tool/android-crash-harness.dart --no-build --kinds native --repeat 20 --log-dir ${{ github.workspace }}/harness-logs/repeat --port ${{ env.OTEL_PORT }}; fi
+            dart run tool/android-crash-harness.dart --no-build --kinds native --relaunch-after 1000,2000,3000,4500,6000,8000 --log-dir ${{ github.workspace }}/harness-logs/relaunch --port ${{ env.OTEL_PORT }}
             dart run tool/android-crash-harness.dart --no-build --release-refusal --port ${{ env.OTEL_PORT }}
             cd example && flutter test integration_test -d emulator-5554
+
+      # What the runs saw, kept when one fails: each run's whole logcat and the
+      # OS's exit records. A failing run also prints the lines that decide it,
+      # but a flake is read here, after the fact, not re-run.
+      - name: Keep the harness logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: harness-logs-api-${{ matrix.api-level }}
+          path: harness-logs
+          if-no-files-found: ignore
+          retention-days: 7
