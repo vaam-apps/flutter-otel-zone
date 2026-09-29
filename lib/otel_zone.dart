@@ -15,4 +15,5 @@ export 'src/native-crash.dart';
 export 'src/native-crash.g.dart';
 export 'src/otel-zone.dart';
 export 'src/recording-observer.dart';
+export 'src/span-redaction.dart' show RedactingSpanExporter;
 export 'src/spool.dart';

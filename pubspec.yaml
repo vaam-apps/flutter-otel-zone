@@ -40,6 +40,11 @@ dependencies:
   # The log sink itself. Not `talker_flutter`: nothing here renders, and an
   # app that wants `TalkerScreen` adds it for its own reasons.
   talker: ^5.1.20
+  # `RiverpodFailLog`, whose error and stack trace live in fields `TalkerData`
+  # does not have, so the bridge has to know the type to scrub and keep them.
+  # It adds nothing to the graph: its own dependencies are `talker`, `riverpod`
+  # and `meta`, all already here.
+  talker_riverpod_logger: ^5.1.20
 
 dev_dependencies:
   flutter_lints: ^6.0.0

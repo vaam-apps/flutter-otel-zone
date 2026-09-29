@@ -1,5 +1,7 @@
 import 'package:otel_talker/otel_talker.dart';
 import 'package:talker/talker.dart';
+import 'package:talker_riverpod_logger/talker_riverpod_logger.dart'
+    show RiverpodFailLog;
 
 import 'config.dart';
 import 'export-floor.dart';
@@ -163,9 +165,9 @@ class OtelBridge extends TalkerObserver {
     );
   }
 
-  /// A copy of [data] with every string scrubbed, the original object when
-  /// there is no [redact], or `null` when the redactor threw — which drops
-  /// the record.
+  /// A copy of [data] with every string field scrubbed on its own, the
+  /// original object when there is no [redact], or `null` when the redactor
+  /// threw — which drops the record.
   ///
   /// Only ever called for a record that clears the floor, so a build's
   /// scrubbing cost is proportional to what it actually exports.
@@ -188,15 +190,21 @@ class OtelBridge extends TalkerObserver {
               data.exception!.runtimeType.toString(),
               redact(data.exception!.toString()),
             );
+      final String message = redact(data.message ?? '');
+      final String? title = data.title == null ? null : redact(data.title!);
+      final StackTrace? stackTrace = data.stackTrace == null
+          ? null
+          : _RedactedStackTrace(redact(data.stackTrace.toString()));
+      if (data is RiverpodFailLog) {
+        return _redactedFailLog(data, redact, message: message, title: title);
+      }
       return TalkerData(
-        redact(data.message ?? ''),
+        message,
         logLevel: data.logLevel,
         error: error,
         exception: exception,
-        stackTrace: data.stackTrace == null
-            ? null
-            : _RedactedStackTrace(redact(data.stackTrace.toString())),
-        title: data.title == null ? null : redact(data.title!),
+        stackTrace: stackTrace,
+        title: title,
         time: data.time,
         key: data.key,
       );
@@ -293,6 +301,62 @@ class OtelBridge extends TalkerObserver {
       // console; losing its OTel copy is the smallest possible failure.
     }
   }
+}
+
+/// A scrubbed `[riverpod-fail]` record.
+///
+/// `talker_riverpod_logger`'s `RiverpodFailLog` keeps its error and stack
+/// trace in fields of its own, `providerError` and `providerStackTrace`, that
+/// exist nowhere on `TalkerData`, and renders them in `generateTextMessage()`,
+/// which is what the sink puts on the wire as the body. A plain copy of the
+/// base fields therefore sends "xProvider failed" and nothing else, so this
+/// keeps the rendering — composed from the pieces, each scrubbed on its own,
+/// never by scrubbing one rendered blob (an anchored redactor such as
+/// `^\d{9}$` matches a whole value, not a paragraph).
+class _RedactedFailLog extends TalkerData {
+  _RedactedFailLog(
+    super.message, {
+    required this.rendered,
+    super.logLevel,
+    super.title,
+    super.time,
+    super.key,
+  });
+
+  /// The record's rendering, composed from scrubbed parts.
+  final String rendered;
+
+  @override
+  String generateTextMessage({
+    TimeFormat timeFormat = TimeFormat.timeAndSeconds,
+  }) => rendered;
+}
+
+/// [log] as a [_RedactedFailLog], in the shape `RiverpodFailLog` renders:
+/// title and time, the message, `ERROR:` and the error (its type alone when
+/// the logger's `printFailFullData` is off), `STACK TRACE:` and the trace.
+TalkerData _redactedFailLog(
+  RiverpodFailLog log,
+  Redactor redact, {
+  required String message,
+  required String? title,
+}) {
+  final String error = log.settings.printFailFullData
+      ? '\n${redact(log.providerError.toString())}'
+      : log.providerError.runtimeType.toString();
+  final String stackTrace = redact(log.providerStackTrace.toString());
+  return _RedactedFailLog(
+    message,
+    rendered:
+        '[$title] | ${log.displayTime()} | '
+        '\n$message'
+        '\nERROR: \n$error'
+        '\nSTACK TRACE: \n$stackTrace',
+    logLevel: log.logLevel,
+    title: title,
+    time: log.time,
+    key: log.key,
+  );
 }
 
 /// A scrubbed stand-in for an `Error`, carrying only redacted text.

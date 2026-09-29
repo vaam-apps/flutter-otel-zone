@@ -92,6 +92,22 @@ GoRouter(
 Both return `null` when the SDK is not up, which is why they are spread
 null-aware rather than listed plainly.
 
+Neither observer records what the app's data looks like unless asked:
+`riverpodObserver()` leaves out provider values (`recordValues`), family
+arguments and mutation keys (`recordArguments`), and `routeObserver()` leaves
+out route arguments (`recordArguments`). Each provider span still carries the
+provider's name and type, the value's runtime type, and — for a failed
+provider — the error's message and stack trace, so those spans are not free of
+app text; see the next section for what scrubs them.
+
+The two attributes `recordArguments` controls are dropped by this package
+rather than by `otel_riverpod`, whose 0.2.0 observer records both whatever
+`recordValues` says
+([Dartastic/otel_riverpod#3](https://github.com/Dartastic/otel_riverpod/issues/3)):
+`riverpod.provider.argument` is the family argument's `toString()`, and
+`riverpod.mutation` is the mutation's, which for a keyed mutation is
+`Mutation<int>#d9771(<key>, label: addToCart)`, key included.
+
 And around anything that emits a span of its own:
 
 ```dart
@@ -131,6 +147,32 @@ scrubbed by it: the message, the title, the error/exception text, the stack
 trace, and each breadcrumb line. It runs *before* truncation and before the
 record reaches the exporter, so nothing unredacted can be persisted or sent.
 
+**What `redact` is handed is one field at a time**, never a rendered record: a
+message, a title, an error's text, a stack trace's text and, for a span, one
+attribute value, one event attribute or one status description each. So a
+whole-value pattern such as `^\+?\d{9,12}$` matches a phone number field, as
+it would on a string of its own. The exceptions are a breadcrumb line, which is
+`time [title] message`, and a `[riverpod-fail]` record, whose error and stack
+trace live only in `RiverpodFailLog`'s own fields and are scrubbed one by one
+and then laid out as that record lays them out. A record kind that renders
+more than `TalkerData` does (an HTTP logger's headers or response body) sends
+only the title, time, message and stack trace when `redact` is set.
+
+**Spans are scrubbed too.** Every string a span exports goes through `redact`:
+attribute values (each element of a string-list value as well), the attributes
+of each span event — which is where a recorded exception's message and stack
+trace are — and of each link, the status description, and the span name.
+Attribute keys, event names and non-text values are the span's schema and are
+left alone. A span whose scrub throws is dropped, as a record is, and the first
+such drop is one warning on the talker (its type, never its text). To do this
+the package builds the trace pipeline itself when `redact` is set, from the
+same `OTEL_TRACES_EXPORTER` and `OTEL_EXPORTER_OTLP_*` variables dartastic
+reads (`otlp` over HTTP or gRPC, and `console`); without `redact` it is
+dartastic's own, untouched. Spans do not go through the export floor or the
+spool. The scrub runs synchronously on the isolate that exports, which is the UI
+isolate: a review measured about 38 ms for a 512-span batch with three regular
+expressions, so keep the redactor cheap.
+
 ```dart
 final OtelZone observability = OtelZone(
   OtelZoneConfig(
@@ -150,6 +192,11 @@ What it does **not** touch:
 
 - **Resource attributes.** They are set by the app at `start()` and are not
   records; give them already-scrubbed values.
+- **The platforms' own crash files.** They are written before Dart runs, and
+  they hold the raw text. See "What the platforms store before Dart runs".
+- **What it cannot know.** A `redact` is a pattern match on text. A value
+  shaped like nothing it looks for gets through, which is why the observers
+  above record no values or arguments to begin with.
 - **`talker.history`.** The redacted copy is what goes to the sink; the
   original record stays on the device, where it is not a disclosure.
 
@@ -209,6 +256,28 @@ await observability.start(serviceVersion: '1.2.3');
   version that crashed rather than whichever one was running when it was
   finally delivered. Replayed records carry `otel_zone.replayed = true`.
 
+### Where the spool lives
+
+The spool is a store of telemetry: ordinary batches, already scrubbed by
+`redact`, and recovered crash reports, kept for up to `spoolMaxAge`. Put it
+where the OS does not copy it off the device.
+`getApplicationSupportDirectory`, which the snippet above passes, is included
+in Android Auto Backup and in iOS device and iCloud backups.
+
+- **`getApplicationCacheDirectory`** (also `path_provider`) is backed up on
+  neither platform. The price is that the OS may clear it when storage runs
+  low, which costs an undelivered batch and nothing else.
+- **Or keep the directory under app support and exclude it from backup
+  yourself:** an exclude rule for it in the Android backup rules, and
+  `isExcludedFromBackup` on the directory on iOS. This package does the same
+  for its own native crash files (below); it cannot for a directory the app
+  names.
+
+**Clear the spool on sign-out**, by deleting the directory you passed (the
+spool creates it again on the next write). Otherwise a batch spooled while one
+person was signed in is delivered, possibly days later, after they have left,
+and stays on the phone until it is.
+
 ## Native crashes
 
 A native crash kills the process before Dart can see it, so the platforms read
@@ -221,6 +290,10 @@ pending() -> redact -> FATAL LogRecord -> spool -> acknowledge -> return
 
 `start()` returns once that is done; delivery carries on in the background, so
 a crash report on a bad connection never delays the first frame.
+
+MetricKit delivers more than deaths: its diagnostic payloads also carry **hang**
+diagnostics, and those are read, exported (as `hang` reports) and stored like a
+crash, though nothing died.
 
 - **FATAL, and not a breadcrumb.** A recovered crash is emitted straight onto
   the export path as a `Severity.FATAL` record with `event.name` of
@@ -250,10 +323,12 @@ a crash report on a bad connection never delays the first frame.
   is accepting other batches and refusing this one, `spoolMaxBatches` evicts
   every ordinary batch before a crash report, and `spoolMaxAge` is the one
   unconditional bound.
-- **Redacted like everything else.** `redact` is applied to the message, the
+- **The exported record is redacted.** `redact` is applied to the message, the
   stack trace and the attributes, because a native stack is the densest PII the
   package ever handles. A redactor that throws drops the report rather than
-  exporting it raw.
+  exporting it raw. That covers what leaves the phone; the platforms' own files
+  are another matter, described under "What the platforms store before Dart
+  runs".
 - **Android and iOS only.** Web is a no-op, and desktop (macOS, Linux,
   Windows) gets Dart-level capture only: the drain makes no platform call and
   logs nothing there. A platform read that fails is one warning on the
@@ -316,6 +391,33 @@ The Flutter-free half of the iOS code is unit-tested with `swift test` from
 `ios/otel_zone/CrashTests`, against fixture payloads shaped like Apple's
 documented JSON. On both platforms `NativeCrashSource` is the seam the drain is
 tested through.
+
+### What the platforms store before Dart runs
+
+`redact` cannot reach these files: the platforms write them before Dart is
+running, and they hold the **raw** text. Say so plainly to whoever reviews what
+the app keeps on the phone.
+
+- **Android, an uncaught JVM exception.** One JSON report per exception in
+  `noBackupFilesDir/otel_zone/crashes`: the exception's class, its raw
+  `message`, its raw stack trace, the thread's name, the process id and the
+  session id. (The OS's own `ApplicationExitInfo` record is read from the OS on
+  each launch and not copied; only a watermark is kept, in
+  `noBackupFilesDir/otel_zone`.)
+- **iOS, MetricKit.** The `MXDiagnosticPayload`'s JSON, verbatim, in
+  `Application Support/otel_zone/diagnostics/`, saved *before* it is parsed —
+  crash and hang diagnostics, and whatever else the payload carries.
+- **iOS, an uncaught `NSException`.** Its name, reason and `callStackSymbols`
+  in `Application Support/otel_zone/exceptions/`, and a small ledger of
+  acknowledged reports (id, name, time) beside them. An exception's reason is
+  free text and often carries app data.
+
+All of it is app-private and in no-backup storage: `noBackupFilesDir` on
+Android, and on iOS a directory marked `isExcludedFromBackup` (best effort: if
+the flag cannot be set the directory is backed up). A file is deleted when the
+report it holds is acknowledged, and at most 16 of each kind are kept, so a
+report the collector never takes stays until the cap evicts it. The drain
+exports a scrubbed copy; these files are what it scrubs *from*.
 
 ### Which build crashed
 

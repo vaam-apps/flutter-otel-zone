@@ -3,6 +3,8 @@ import 'package:dartastic_opentelemetry/dartastic_opentelemetry.dart';
 /// The headers dartastic's own logs exporter would send, resolved the way it
 /// resolves them.
 ///
+/// [signal] is `logs` unless the trace pipeline asks (`traces`).
+///
 /// `OTEL_EXPORTER_OTLP_LOGS_HEADERS` wins over `OTEL_EXPORTER_OTLP_HEADERS`,
 /// and either can come from the environment or from `--dart-define`. That
 /// lookup is `OTelEnv.getOtlpConfig`, which is public, so it is called here
@@ -17,9 +19,9 @@ import 'package:dartastic_opentelemetry/dartastic_opentelemetry.dart';
 /// the app has no telemetry at all.
 ///
 /// Header values are credentials. Nothing here logs them.
-Map<String, String> resolveOtlpHeaders() {
+Map<String, String> resolveOtlpHeaders({String signal = 'logs'}) {
   final Map<String, String>? resolved = OTelEnv.getOtlpConfig(
-    signal: 'logs',
+    signal: signal,
   ).headers;
   if (resolved == null) return const <String, String>{};
   return <String, String>{
