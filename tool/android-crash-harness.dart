@@ -589,7 +589,26 @@ class _ReleaseRefusal {
       'no crash/ANR exit record: $noExit',
     );
     ok &= refused && noFatal && noExit;
+
+    // A control for the matcher above: a check that greps a dump for a format
+    // it has never seen would pass vacuously. Force-stopping the app makes the
+    // OS file a REASON_USER_REQUESTED record, so the dump must now contain a
+    // `reason=<n> (` line at all; if it does not, the format has changed and
+    // the "no crash/ANR exit record" verdict above means nothing.
     await device.forceStop();
+    final String after = await device.exitInfo();
+    final List<String> reasons = <String>[
+      for (final RegExpMatch m in RegExp(
+        r'reason=\d+ \([^)]*\)',
+      ).allMatches(after))
+        m.group(0)!,
+    ];
+    final bool parsed = reasons.isNotEmpty;
+    stdout.writeln(
+      '  exit-info control: after a force-stop the dump lists $reasons '
+      '(${parsed ? 'format recognised' : 'FORMAT NOT RECOGNISED'})',
+    );
+    ok &= parsed;
     stdout.writeln(ok ? '  PASS release refuses the crash channel' : '  FAIL');
     return ok;
   }
