@@ -39,9 +39,14 @@ Future<void> main() => observability.runGuarded(() async {
   // In a real app these come from `package_info_plus` and
   // `device_info_plus`, read off the installed artifact — never
   // hardcoded, or every build ever shipped reports the same identity.
+  // Here `--dart-define` stands in for that read, so the crash harness can
+  // install two builds and tell their identities apart.
   await observability.start(
-    serviceVersion: '1.0.0',
-    buildId: '1',
+    serviceVersion: const String.fromEnvironment(
+      'APP_VERSION',
+      defaultValue: '1.0.0',
+    ),
+    buildId: const String.fromEnvironment('APP_BUILD', defaultValue: '1'),
     resourceAttributes: const <String, String>{'os.type': 'android'},
   );
 

@@ -18,6 +18,23 @@
 //      receiver, and the app's start-up line must say it recovered one;
 //   5. relaunch once more: nothing may have been recovered.
 //
+// Each recovered record must also say which build died: the attributes
+// `otel_zone.crashed.service.version` and `otel_zone.crashed.app.build_id`,
+// which the app reads back from the process that crashed.
+//
+// `--upgrade-apk <apk>` adds the case that attribute exists for. After step 3
+// the second build is installed *over* the first, without clearing its data,
+// and step 4 then also requires the record's resource (the reporting launch)
+// to name the new build while the crashed-build attributes still name the old
+// one. Build the two like this, then pass the second to `--upgrade-apk`:
+//
+//     flutter build apk --debug --build-name 1.0.0 --build-number 1 \
+//         --dart-define=APP_VERSION=1.0.0 --dart-define=APP_BUILD=1
+//     cp build/app/outputs/flutter-apk/app-debug.apk /tmp/first.apk
+//     flutter build apk --debug --build-name 1.0.1 --build-number 2 \
+//         --dart-define=APP_VERSION=1.0.1 --dart-define=APP_BUILD=2
+//
+
 // "Reached the receiver" is the point. The assertion reads what was on the
 // wire, not a marker the app prints about itself.
 //
@@ -32,6 +49,10 @@ import 'otlp-log-sink.dart';
 const String _package = 'com.example.otel_zone_example';
 const String _activity = '$_package/.MainActivity';
 const String _extra = 'otel_crash';
+
+/// The attributes a native crash record uses for the build that crashed.
+const String _crashedVersion = 'otel_zone.crashed.service.version';
+const String _crashedBuild = 'otel_zone.crashed.app.build_id';
 
 /// The app's start-up summary, which `start()` logs after the drain has
 /// exported and acknowledged, so its arrival means "the drain is over".
@@ -88,6 +109,11 @@ class _Options {
     required this.releaseRefusal,
     required this.apk,
     required this.adb,
+    required this.upgradeApk,
+    required this.crashedVersion,
+    required this.crashedBuild,
+    required this.upgradedVersion,
+    required this.upgradedBuild,
   });
 
   factory _Options.parse(List<String> arguments) {
@@ -127,6 +153,11 @@ class _Options {
       releaseRefusal: flags.contains('release-refusal'),
       apk: values['apk'],
       adb: values['adb'] ?? (home.isEmpty ? 'adb' : '$home/platform-tools/adb'),
+      upgradeApk: values['upgrade-apk'],
+      crashedVersion: values['crashed-version'] ?? '1.0.0',
+      crashedBuild: values['crashed-build'] ?? '1',
+      upgradedVersion: values['upgraded-version'] ?? '1.0.1',
+      upgradedBuild: values['upgraded-build'] ?? '2',
     );
   }
 
@@ -139,6 +170,17 @@ class _Options {
   final bool releaseRefusal;
   final String? apk;
   final String adb;
+
+  /// When set, this build is installed over the crashed one before relaunch.
+  final String? upgradeApk;
+
+  /// The version and build the crashing APK was built as.
+  final String crashedVersion;
+  final String crashedBuild;
+
+  /// The version and build of [upgradeApk].
+  final String upgradedVersion;
+  final String upgradedBuild;
 
   String get endpoint => 'http://127.0.0.1:$port';
 
@@ -155,6 +197,13 @@ usage: dart run tool/android-crash-harness.dart [options]
   --no-build             use the existing APK instead of building
   --retries <n>          re-run a failed kind this many times; default 1
   --death-timeout <s>    how long to wait for the process to die; default 90
+  --upgrade-apk <path>   install this build over the crashed one (data kept)
+                         before relaunching, and check the record names the
+                         crashed build while its resource names this one
+  --crashed-version <v>  versionName the crashing APK was built as; 1.0.0
+  --crashed-build <n>    versionCode of the crashing APK; 1
+  --upgraded-version <v> versionName of --upgrade-apk; 1.0.1
+  --upgraded-build <n>   versionCode of --upgrade-apk; 2
   --release-refusal      instead, prove a release build refuses to crash
   --adb <path>           adb executable; default \$ANDROID_HOME/platform-tools/adb''',
     );
@@ -255,6 +304,11 @@ class _Device {
     }
     await adbCommand(<String>['install', '-r', '-t', apk]);
   }
+
+  /// Installs [apk] over the installed app, keeping its data: what an update
+  /// from a store does, and what `reinstall` deliberately does not.
+  Future<void> upgrade(String apk) =>
+      adbCommand(<String>['install', '-r', '-t', apk]);
 
   Future<int?> pid() async {
     final ProcessResult result = await Process.run(adb, <String>[
@@ -366,6 +420,15 @@ class _KindRun {
       );
       stdout.writeln('  process died: $died');
 
+      final String? upgradeApk = options.upgradeApk;
+      if (upgradeApk != null) {
+        await device.upgrade(upgradeApk);
+        stdout.writeln(
+          '  upgraded ${options.crashedVersion}+${options.crashedBuild} to '
+          '${options.upgradedVersion}+${options.upgradedBuild} in place',
+        );
+      }
+
       final _Summary? second = await device.launch();
       await _settle();
       final List<SinkRecord> received = sink.records;
@@ -389,6 +452,41 @@ class _KindRun {
         crashes.every((SinkRecord r) => r.isFatal),
         'launch 2: a recovered crash was not FATAL',
       );
+      // The build that crashed, from the crashed process; the resource, from
+      // the launch that reported it. After an upgrade they differ.
+      final String resourceVersion = upgradeApk == null
+          ? options.crashedVersion
+          : options.upgradedVersion;
+      final String resourceBuild = upgradeApk == null
+          ? options.crashedBuild
+          : options.upgradedBuild;
+      for (final SinkRecord r in crashes) {
+        stdout.writeln(
+          '    crashed build ${r.attributes[_crashedVersion]}+'
+          '${r.attributes[_crashedBuild]}, resource '
+          '${r.resource['service.version']}+${r.resource['app.build_id']}',
+        );
+        _expect(
+          r.attributes[_crashedVersion] == options.crashedVersion,
+          'launch 2: $_crashedVersion is ${r.attributes[_crashedVersion]}, '
+          'expected ${options.crashedVersion}',
+        );
+        _expect(
+          r.attributes[_crashedBuild] == options.crashedBuild,
+          'launch 2: $_crashedBuild is ${r.attributes[_crashedBuild]}, '
+          'expected ${options.crashedBuild}',
+        );
+        _expect(
+          r.resource['service.version'] == resourceVersion,
+          'launch 2: resource service.version is '
+          '${r.resource['service.version']}, expected $resourceVersion',
+        );
+        _expect(
+          r.resource['app.build_id'] == resourceBuild,
+          'launch 2: resource app.build_id is ${r.resource['app.build_id']}, '
+          'expected $resourceBuild',
+        );
+      }
       final String event = kind == 'anr' ? 'device.anr' : 'device.crash';
       _expect(
         crashes.every((SinkRecord r) => r.eventName == event),

@@ -21,6 +21,12 @@ pb.KeyValue _string(String key, String value) => pb.KeyValue(
 Uint8List _request() => pb.ExportLogsServiceRequest(
   resourceLogs: <pb.ResourceLogs>[
     pb.ResourceLogs(
+      resource: pb.Resource(
+        attributes: <pb.KeyValue>[
+          _string('service.version', '1.0.1'),
+          _string('app.build_id', '2'),
+        ],
+      ),
       scopeLogs: <pb.ScopeLogs>[
         pb.ScopeLogs(
           logRecords: <pb.LogRecord>[
@@ -60,6 +66,15 @@ void main() {
     expect(records.first.attributes.containsKey('a.number'), isFalse);
     expect(records.last.isFatal, isFalse);
     expect(records.last.crashKind, isNull);
+    // The resource travels with every record of its batch, and is kept apart
+    // from the record's own attributes.
+    for (final SinkRecord record in records) {
+      expect(record.resource, <String, String>{
+        'service.version': '1.0.1',
+        'app.build_id': '2',
+      });
+    }
+    expect(records.first.attributes.containsKey('service.version'), isFalse);
   });
 
   test('an empty request decodes to no records', () {
@@ -79,6 +94,14 @@ void main() {
     final List<SinkRecord> records = decodeLogsJson(<String, Object?>{
       'resourceLogs': <Object?>[
         <String, Object?>{
+          'resource': <String, Object?>{
+            'attributes': <Object?>[
+              <String, Object?>{
+                'key': 'service.version',
+                'value': <String, Object?>{'stringValue': '1.0.1'},
+              },
+            ],
+          },
           'scopeLogs': <Object?>[
             <String, Object?>{
               'logRecords': <Object?>[
@@ -101,6 +124,9 @@ void main() {
 
     expect(records.single.crashKind, 'jvm');
     expect(records.single.isFatal, isTrue);
+    expect(records.single.resource, <String, String>{
+      'service.version': '1.0.1',
+    });
   });
 
   group('OtlpLogSink', () {

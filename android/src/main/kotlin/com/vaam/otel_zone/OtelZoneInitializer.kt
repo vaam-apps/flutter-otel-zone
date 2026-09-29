@@ -16,14 +16,19 @@ import androidx.startup.Initializer
 class OtelZoneInitializer : Initializer<Unit> {
 
     override fun create(context: Context) {
-        installJvmCrashHandler(CrashStore(crashDirectory(context), sessionId = RunSession.id))
+        // Read now, not in the handler: a dying process should not be
+        // calling the package manager, and this is the build that is running.
+        val build = AppBuild.read(context)
+        installJvmCrashHandler(
+            CrashStore(crashDirectory(context), sessionId = RunSession.id, build = build),
+        )
 
         // Tags this process so that its ApplicationExitInfo, read on a later
-        // launch, says which session it ended. Below API 30 this is a no-op
-        // and the JVM reports carry the session id themselves.
+        // launch, says which session and which build it ended. Below API 30
+        // this is a no-op and the JVM reports carry both themselves.
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
         if (activityManager != null) {
-            RunSession.tag { summary -> activityManager.setProcessStateSummary(summary) }
+            RunSession.tag(build = build) { summary -> activityManager.setProcessStateSummary(summary) }
         }
     }
 

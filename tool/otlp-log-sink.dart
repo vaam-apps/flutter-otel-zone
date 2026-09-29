@@ -22,6 +22,7 @@ class SinkRecord {
   const SinkRecord({
     required this.severityNumber,
     required this.attributes,
+    this.resource = const <String, String>{},
     this.body,
     this.eventName,
   });
@@ -31,6 +32,11 @@ class SinkRecord {
 
   /// The record's string-valued attributes.
   final Map<String, String> attributes;
+
+  /// The string-valued attributes of the resource the record was exported
+  /// under: for a crash recovered by a later launch, that launch's identity,
+  /// not the crashed run's.
+  final Map<String, String> resource;
 
   /// The record body, when it is a string.
   final String? body;
@@ -61,18 +67,26 @@ List<SinkRecord> decodeLogsProtobuf(Uint8List bytes) {
   final List<SinkRecord> records = <SinkRecord>[];
   // ExportLogsServiceRequest.resource_logs = 1
   for (final Uint8List resourceLogs in _fields(bytes, 1)) {
+    // ResourceLogs.resource = 1, Resource.attributes = 1
+    final Map<String, String> resource = <String, String>{};
+    for (final Uint8List message in _fields(resourceLogs, 1)) {
+      for (final Uint8List attribute in _fields(message, 1)) {
+        final (String key, String? value) = _keyValue(attribute);
+        if (value != null) resource[key] = value;
+      }
+    }
     // ResourceLogs.scope_logs = 2
     for (final Uint8List scopeLogs in _fields(resourceLogs, 2)) {
       // ScopeLogs.log_records = 2
       for (final Uint8List record in _fields(scopeLogs, 2)) {
-        records.add(_decodeRecord(record));
+        records.add(_decodeRecord(record, resource));
       }
     }
   }
   return records;
 }
 
-SinkRecord _decodeRecord(Uint8List record) {
+SinkRecord _decodeRecord(Uint8List record, Map<String, String> resource) {
   int severity = 0;
   String? body;
   String? eventName;
@@ -97,6 +111,7 @@ SinkRecord _decodeRecord(Uint8List record) {
   return SinkRecord(
     severityNumber: severity,
     attributes: attributes,
+    resource: resource,
     body: body,
     eventName: eventName ?? attributes['event.name'],
   );
@@ -211,27 +226,26 @@ class _Reader {
 /// Decodes an OTLP/JSON `ExportLogsServiceRequest`.
 List<SinkRecord> decodeLogsJson(Object? json) {
   final List<SinkRecord> records = <SinkRecord>[];
-  for (final Object? resource in _list(
+  for (final Object? resourceLogs in _list(
     (json as Map<String, Object?>)['resourceLogs'],
   )) {
-    for (final Object? scope in _list(
-      (resource as Map<String, Object?>)['scopeLogs'],
-    )) {
+    final Map<String, String> resource = _jsonAttributes(
+      ((resourceLogs as Map<String, Object?>)['resource']
+          as Map<String, Object?>?)?['attributes'],
+    );
+    for (final Object? scope in _list(resourceLogs['scopeLogs'])) {
       for (final Object? record in _list(
         (scope as Map<String, Object?>)['logRecords'],
       )) {
         final Map<String, Object?> map = record as Map<String, Object?>;
-        final Map<String, String> attributes = <String, String>{};
-        for (final Object? attribute in _list(map['attributes'])) {
-          final Map<String, Object?> kv = attribute as Map<String, Object?>;
-          final Object? value =
-              (kv['value'] as Map<String, Object?>?)?['stringValue'];
-          if (value is String) attributes[kv['key'] as String] = value;
-        }
+        final Map<String, String> attributes = _jsonAttributes(
+          map['attributes'],
+        );
         records.add(
           SinkRecord(
             severityNumber: (map['severityNumber'] as num?)?.toInt() ?? 0,
             attributes: attributes,
+            resource: resource,
             body:
                 (map['body'] as Map<String, Object?>?)?['stringValue']
                     as String?,
@@ -242,6 +256,18 @@ List<SinkRecord> decodeLogsJson(Object? json) {
     }
   }
   return records;
+}
+
+/// The string-valued entries of an OTLP/JSON `KeyValue` list.
+Map<String, String> _jsonAttributes(Object? list) {
+  final Map<String, String> attributes = <String, String>{};
+  for (final Object? attribute in _list(list)) {
+    final Map<String, Object?> kv = attribute as Map<String, Object?>;
+    final Object? value =
+        (kv['value'] as Map<String, Object?>?)?['stringValue'];
+    if (value is String) attributes[kv['key'] as String] = value;
+  }
+  return attributes;
 }
 
 List<Object?> _list(Object? value) =>

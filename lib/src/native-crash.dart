@@ -108,6 +108,24 @@ class NativeCrashDrain {
   /// The OTel event name for an ANR.
   static const String eventAnr = 'device.anr';
 
+  /// The version of the app that crashed, on a native crash record.
+  ///
+  /// A record is exported by the *next* launch, under that launch's resource,
+  /// so after an app update the resource's `service.version` names the build
+  /// that reported the crash, not the one that died. This names the one that
+  /// died, which is the binary a symbolicator needs. The platform writes it
+  /// (Android `versionName`, iOS `CFBundleShortVersionString`); it is absent
+  /// when the platform could not say, and never filled in with the current
+  /// version, because a wrong one is worse than none.
+  static const String crashedServiceVersion =
+      'otel_zone.crashed.service.version';
+
+  /// The build of the app that crashed, on a native crash record: Android's
+  /// `longVersionCode`, iOS's `CFBundleVersion`. The counterpart of
+  /// [crashedServiceVersion] for the resource's `app.build_id`, with the same
+  /// absence rule.
+  static const String crashedBuildId = 'otel_zone.crashed.app.build_id';
+
   /// Deliveries still running after [drain] returned, so a test can wait.
   final Set<Future<void>> _background = <Future<void>>{};
 
@@ -228,6 +246,13 @@ class NativeCrashDrain {
               in report.attributes!.entries)
             attribute.key: _scrub(attribute.value) ?? '',
       };
+      // The crashed build is either known or absent: a platform that has
+      // nothing to say must not leave an empty string that reads as a value.
+      for (final String key in _crashedBuildKeys) {
+        if (attributes[key] case final String value when value.trim().isEmpty) {
+          attributes.remove(key);
+        }
+      }
       if (type != null) attributes['exception.type'] = type;
       if (message != null) attributes['exception.message'] = message;
       if (stacktrace != null) attributes['exception.stacktrace'] = stacktrace;
@@ -255,6 +280,11 @@ class NativeCrashDrain {
       return null;
     }
   }
+
+  static const List<String> _crashedBuildKeys = <String>[
+    crashedServiceVersion,
+    crashedBuildId,
+  ];
 
   String? _scrub(String? value) {
     if (value == null) return null;

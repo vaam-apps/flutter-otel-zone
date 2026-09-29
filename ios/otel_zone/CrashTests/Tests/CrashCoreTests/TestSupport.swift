@@ -66,11 +66,12 @@ struct Harness {
   func writeException(
     name: String = "NSRangeException", reason: String? = "x",
     symbols: [String] = ["0 App 0x1 main"],
+    build: AppBuild = .unknown,
     at unixSeconds: TimeInterval
   ) -> String {
     let exception = NSException(name: NSExceptionName(name), reason: reason, userInfo: nil)
     let data = try! NSExceptionSource.encode(
-      exception, now: Date(timeIntervalSince1970: unixSeconds))
+      exception, now: Date(timeIntervalSince1970: unixSeconds), build: build)
     // `encode` reads callStackSymbols, which is empty for an exception that
     // was never raised, so the symbols are patched in.
     var json = try! JSONSerialization.jsonObject(with: data) as! [String: Any]

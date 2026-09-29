@@ -430,6 +430,115 @@ void main() {
     expect(source.pendingCalls, 0);
   });
 
+  group('the crashed build', () {
+    Future<ReadableLogRecord> exported(NativeCrashReport report) async {
+      final _RecordingExporter exporter = _RecordingExporter();
+      final NativeCrashDrain subject = drain(
+        _FakeSource(<NativeCrashReport>[report]),
+        exporter,
+      );
+      await subject.drain();
+      await subject.settled();
+      return exporter.batches.single.single;
+    }
+
+    test('the record names the build that crashed and the resource the build '
+        'that reported it', () async {
+      // The crash is from build 1.0.0+1; this launch is `0.0.1`, the
+      // version the test initialised the SDK with.
+      final ReadableLogRecord record = await exported(
+        _report(
+          attributes: <String, String>{
+            'otel_zone.crashed.service.version': '1.0.0',
+            'otel_zone.crashed.app.build_id': '1',
+          },
+        ),
+      );
+
+      expect(
+        record.attributes?.getString(NativeCrashDrain.crashedServiceVersion),
+        '1.0.0',
+      );
+      expect(
+        record.attributes?.getString(NativeCrashDrain.crashedBuildId),
+        '1',
+      );
+      expect(record.resource?.attributes.getString('service.version'), '0.0.1');
+    });
+
+    test('the two attribute names are the ones the platforms write', () {
+      expect(
+        NativeCrashDrain.crashedServiceVersion,
+        'otel_zone.crashed.service.version',
+      );
+      expect(NativeCrashDrain.crashedBuildId, 'otel_zone.crashed.app.build_id');
+    });
+
+    test(
+      'a report that does not know its build has neither attribute',
+      () async {
+        final ReadableLogRecord record = await exported(
+          _report(attributes: <String, String>{'process.pid': '1'}),
+        );
+        final ReadableLogRecord noAttributes = await exported(_report());
+
+        for (final ReadableLogRecord r in <ReadableLogRecord>[
+          record,
+          noAttributes,
+        ]) {
+          expect(
+            r.attributes?.getString(NativeCrashDrain.crashedServiceVersion),
+            isNull,
+          );
+          expect(
+            r.attributes?.getString(NativeCrashDrain.crashedBuildId),
+            isNull,
+          );
+        }
+      },
+    );
+
+    test(
+      'a blank value is omitted rather than exported as an empty string',
+      () async {
+        final ReadableLogRecord record = await exported(
+          _report(
+            attributes: <String, String>{
+              'otel_zone.crashed.service.version': '',
+              'otel_zone.crashed.app.build_id': '  ',
+            },
+          ),
+        );
+
+        expect(
+          record.attributes?.getString(NativeCrashDrain.crashedServiceVersion),
+          isNull,
+        );
+        expect(
+          record.attributes?.getString(NativeCrashDrain.crashedBuildId),
+          isNull,
+        );
+      },
+    );
+
+    test('one known half is kept without the other', () async {
+      final ReadableLogRecord record = await exported(
+        _report(
+          attributes: <String, String>{'otel_zone.crashed.app.build_id': '7'},
+        ),
+      );
+
+      expect(
+        record.attributes?.getString(NativeCrashDrain.crashedBuildId),
+        '7',
+      );
+      expect(
+        record.attributes?.getString(NativeCrashDrain.crashedServiceVersion),
+        isNull,
+      );
+    });
+  });
+
   test('the redactor scrubs the record it produces', () async {
     final _FakeSource source = _FakeSource(<NativeCrashReport>[
       _report(

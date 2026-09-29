@@ -224,6 +224,12 @@ internal class ExitInfoSource(
             "process.pid" to record.pid.toString(),
         )
         record.processName?.let { attributes["process.name"] = it }
+        // The summary is the crashed process's own note of the run it was in,
+        // which is the only place the crashed build survives an app update.
+        // A run that predates the build being written has none, and gets none.
+        val summary = RunSession.decodeTag(record.processStateSummary)
+        summary?.versionName?.let { attributes[CrashedBuild.SERVICE_VERSION] = it }
+        summary?.buildId?.let { attributes[CrashedBuild.BUILD_ID] = it }
         if (record.pssKb > 0) attributes["exit.pss_kb"] = record.pssKb.toString()
         if (record.rssKb > 0) attributes["exit.rss_kb"] = record.rssKb.toString()
 
@@ -297,7 +303,7 @@ internal class ExitInfoSource(
             message = message?.take(MAX_MESSAGE_CHARS),
             stacktrace = stacktrace,
             threads = null,
-            sessionId = RunSession.decode(record.processStateSummary),
+            sessionId = summary?.sessionId,
             attributes = attributes,
         )
     }

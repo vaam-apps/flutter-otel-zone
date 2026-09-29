@@ -228,8 +228,12 @@ enum MetricKitPayloadMapper {
     _ meta: [String: Any], known: Set<String>, to attributes: inout [String: String]
   ) {
     let named: [String: String] = [
-      "appVersion": "metrickit.app_version",
-      "appBuildVersion": "metrickit.app_build_version",
+      // The same two names the Android and NSException paths use, and only
+      // those: the earlier `metrickit.app_*` copies carried the same value
+      // under a second, platform-specific name, and two names for one fact is
+      // how they drift apart.
+      "appVersion": CrashedBuildAttribute.serviceVersion,
+      "appBuildVersion": CrashedBuildAttribute.buildId,
       "osVersion": "metrickit.os_version",
       "deviceType": "metrickit.device_type",
       "platformArchitecture": "metrickit.platform_architecture",
@@ -237,7 +241,12 @@ enum MetricKitPayloadMapper {
       "bundleIdentifier": "metrickit.bundle_id",
     ]
     for (key, name) in named {
-      if let value = string(meta[key]) { attributes[name] = cap(value) }
+      // A blank build is unknown, not an empty attribute.
+      if let value = string(meta[key]),
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      {
+        attributes[name] = cap(value)
+      }
     }
     var extras = 0
     for key in meta.keys.sorted() where !known.contains(key) && named[key] == nil {
