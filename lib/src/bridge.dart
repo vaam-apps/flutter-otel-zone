@@ -163,7 +163,8 @@ class OtelBridge extends TalkerObserver {
     );
   }
 
-  /// A copy of [data] with every string scrubbed, the original object when
+  /// A copy of [data] with every string scrubbed and its rendering scrubbed,
+  /// the original object when
   /// there is no [redact], or `null` when the redactor threw — which drops
   /// the record.
   ///
@@ -188,8 +189,17 @@ class OtelBridge extends TalkerObserver {
               data.exception!.runtimeType.toString(),
               redact(data.exception!.toString()),
             );
-      return TalkerData(
+      return _RedactedRecord(
         redact(data.message ?? ''),
+        // What the original would have put on the wire, scrubbed. The sink
+        // renders a record's body with `generateTextMessage()`, and a subclass
+        // may keep what it renders in fields of its own — `talker_riverpod_logger`'s
+        // `RiverpodFailLog` holds its error and stack trace in `providerError`
+        // and `providerStackTrace`, none of the fields copied here — so
+        // scrubbing the fields alone would send "xProvider failed" and nothing
+        // else. Rendered once, inside this `try`, so a redactor that throws
+        // drops the record like it does for every other field.
+        rendered: redact(data.generateTextMessage()),
         logLevel: data.logLevel,
         error: error,
         exception: exception,
@@ -293,6 +303,33 @@ class OtelBridge extends TalkerObserver {
       // console; losing its OTel copy is the smallest possible failure.
     }
   }
+}
+
+/// A scrubbed copy of a record, whose rendering is the original's, scrubbed.
+///
+/// Every field is redacted as before; only `generateTextMessage()` differs
+/// from a plain `TalkerData`, so a record kind that renders more than its own
+/// message keeps that content on the wire.
+class _RedactedRecord extends TalkerData {
+  _RedactedRecord(
+    super.message, {
+    required this.rendered,
+    super.logLevel,
+    super.error,
+    super.exception,
+    super.stackTrace,
+    super.title,
+    super.time,
+    super.key,
+  });
+
+  /// The original's `generateTextMessage()`, scrubbed.
+  final String rendered;
+
+  @override
+  String generateTextMessage({
+    TimeFormat timeFormat = TimeFormat.timeAndSeconds,
+  }) => rendered;
 }
 
 /// A scrubbed stand-in for an `Error`, carrying only redacted text.

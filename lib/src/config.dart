@@ -9,7 +9,9 @@ import 'export-floor.dart';
 ///
 /// It is applied to every exported record's message, title, error/exception
 /// text, stack trace, and each breadcrumb line — the whole of what an
-/// `OTelTalkerObserver` puts on the wire.
+/// `OTelTalkerObserver` puts on the wire — and to every string a span carries:
+/// attribute values, event attributes (a recorded exception's message and
+/// stack trace), link attributes, the status description and the span name.
 ///
 /// ```dart
 /// String scrubPhoneNumbers(String input) =>
@@ -112,16 +114,28 @@ final class OtelZoneConfig {
   /// turn a fault into a payload.
   final int breadcrumbLineLimit;
 
-  /// Scrubs every exported string before it leaves the device.
+  /// Scrubs every exported string before it leaves the device: log records,
+  /// crash reports and spans.
   ///
   /// This is the one point every record crosses, which is why scrubbing lives
   /// here and not at each call site: a rule bolted on per call site is a rule
   /// that one call site eventually misses. It runs *before* truncation and
   /// before any export, so nothing unredacted can be persisted or sent.
   ///
+  /// For a span that is every attribute value (and each element of a
+  /// string-list value), the attributes of each event and link, the status
+  /// description and the name. Keys, event names and non-text values are left
+  /// alone. With a [redact] set, [OtelZone.start] builds the trace pipeline
+  /// itself, from the same `OTEL_TRACES_EXPORTER` and `OTEL_EXPORTER_OTLP_*`
+  /// variables dartastic reads; without one, dartastic's own is used.
+  ///
+  /// It does not reach the raw crash files the Android and iOS code write
+  /// before Dart runs (in no-backup storage, deleted once acknowledged); the
+  /// README's "What the platforms store before Dart runs" lists them.
+  ///
   /// `null` means no scrubbing — the behaviour of every build that does not
-  /// supply one. A [redact] that throws drops the record rather than letting
-  /// it through unredacted (fail closed).
+  /// supply one. A [redact] that throws drops the record, or the span, rather
+  /// than letting it through unredacted (fail closed).
   ///
   /// ```dart
   /// redact: (input) => input.replaceAll(RegExp(r'\d{9}'), '<phone>'),
@@ -183,6 +197,11 @@ final class OtelZoneConfig {
   /// written there *before* it is sent and deleted once the collector has
   /// taken it, so a refusal, or a process killed mid-request, leaves it on
   /// disk. [OtelZone.start] replays what is left on the next launch.
+  ///
+  /// Prefer a directory the OS does not back up:
+  /// `getApplicationSupportDirectory` is included in Android Auto Backup and
+  /// in iOS backups, and `getApplicationCacheDirectory` is not. Delete the
+  /// directory on sign-out. See the README's "Where the spool lives".
   ///
   /// A function rather than a [Directory] because the directory does not
   /// exist to be named until the platform channels do, which is after this

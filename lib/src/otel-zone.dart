@@ -15,6 +15,8 @@ import 'bridge.dart';
 import 'config.dart';
 import 'native-crash.dart';
 import 'otlp-exporter.dart';
+import 'riverpod-arguments.dart';
+import 'span-redaction.dart';
 import 'spool.dart';
 
 /// One `Talker`, one OpenTelemetry SDK, and one guarded zone that funnels
@@ -170,6 +172,18 @@ class OtelZone {
           onWarning: talker.warning,
         );
       }
+      // With a `redact`, spans need a pipeline of their own: dartastic offers
+      // no way to put a scrubber in front of the exporter it builds. `null`
+      // (no `redact`, or `OTEL_TRACES_EXPORTER=none`) leaves that one in
+      // place, configured from the environment as before.
+      final Redactor? redact = config.redact;
+      final SpanProcessor? spanProcessor = redact == null
+          ? null
+          : buildRedactingSpanProcessor(
+              endpoint: config.endpoint,
+              secure: config.secure,
+              redact: redact,
+            );
       await OTel.initialize(
         serviceName: config.serviceName,
         serviceVersion: serviceVersion,
@@ -177,6 +191,7 @@ class OtelZone {
         secure: config.secure,
         enableLogs: config.enableLogs,
         enableMetrics: config.enableMetrics,
+        spanProcessor: spanProcessor,
         logRecordExporter: spool,
         resourceAttributes: OTel.attributesFromMap(<String, String>{
           ...resourceAttributes,
@@ -486,15 +501,37 @@ class OtelZone {
   /// `OTel.tracerProvider()`. Constructing one eagerly would turn "no
   /// collector on this network" into "the app does not start".
   ///
+  /// **What the spans carry.** Each provider event is a span with the
+  /// provider's name, runtime type, family and the value's runtime type. A
+  /// failed provider adds the error's message and stack trace as an exception
+  /// event and as the status description. Those go through
+  /// [OtelZoneConfig.redact] when one is configured, like every other span.
+  ///
   /// [recordValues] stays off by default: provider state is where an app's
   /// own data lives — orders, phone numbers, identity drafts — and this
-  /// leaves the device. The runtime *type* of each value is recorded either
-  /// way, which is what makes the spans useful without making them a PII
-  /// channel.
-  ProviderObserver? riverpodObserver({bool recordValues = false}) {
+  /// leaves the device. Off, the value's `toString()` and the previous
+  /// value's are not recorded; on, they are (scrubbed by `redact`, and cut at
+  /// 256 characters).
+  ///
+  /// [recordArguments] stays off by default for the same reason. A family
+  /// provider's argument is often what a user typed — a search query, a
+  /// phone number, a coordinate — and `otel_riverpod` 0.2.0 records its
+  /// `toString()` as `riverpod.provider.argument` on every span, whatever
+  /// [recordValues] says. Off, this observer drops that attribute before the
+  /// span ends. On, it is recorded and `redact` is the only thing between it
+  /// and the collector; `redact` is best-effort pattern matching, so prefer
+  /// leaving it off. Only the spans of the observer this returns are
+  /// affected.
+  ProviderObserver? riverpodObserver({
+    bool recordValues = false,
+    bool recordArguments = false,
+  }) {
     if (!bridge.ready) return null;
     try {
-      return OTelRiverpodObserver(recordValues: recordValues);
+      final ProviderObserver observer = OTelRiverpodObserver(
+        recordValues: recordValues,
+      );
+      return recordArguments ? observer : withoutProviderArguments(observer);
     } on Object catch (error) {
       talker.warning('OTel Riverpod instrumentation unavailable', error);
       return null;

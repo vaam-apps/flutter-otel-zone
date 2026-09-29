@@ -6,7 +6,9 @@
 // invites.
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otel_zone/otel_zone.dart';
+import 'package:riverpod/riverpod.dart';
 import 'package:talker/talker.dart';
+import 'package:talker_riverpod_logger/talker_riverpod_logger.dart';
 
 void main() {
   OtelBridge bridgeWith({
@@ -326,6 +328,62 @@ void main() {
       expect(record.message, 'both <phone>');
       expect(record.error.toString(), contains('<phone>'));
       expect(record.exception.toString(), contains('<phone>'));
+    });
+
+    group('a [riverpod-fail] record', () {
+      // The real record `TalkerRiverpodObserver` writes, through a real
+      // `Talker` into the bridge. Its error and stack trace are in fields of
+      // `RiverpodFailLog`'s own, not in `TalkerData.error`, so a copy that
+      // rebuilds a plain `TalkerData` from the base fields loses them.
+      final Provider<int> failing = Provider<int>(
+        (Ref ref) => throw StateError('could not reach 699887766'),
+      );
+
+      List<TalkerData> failRecords({Redactor? redact}) {
+        final RecordingTalkerObserver sink = RecordingTalkerObserver();
+        final OtelBridge bridge = OtelBridge(
+          floor: const ExportFloor.of(LogLevel.warning),
+          history: () => const <TalkerData>[],
+          sink: sink,
+          redact: redact,
+        )..ready = true;
+        final Talker talker = Talker(
+          observer: bridge,
+          settings: TalkerSettings(useConsoleLogs: false),
+        );
+        final ProviderContainer container = ProviderContainer(
+          observers: <ProviderObserver>[TalkerRiverpodObserver(talker: talker)],
+        );
+        addTearDown(container.dispose);
+        expect(() => container.read(failing), throwsA(anything));
+        return sink.records
+            .where((TalkerData r) => r.key == TalkerKey.riverpodFail)
+            .toList();
+      }
+
+      test('keeps its error and stack trace, scrubbed', () {
+        final TalkerData record = failRecords(redact: scrub).single;
+
+        final String body = record.generateTextMessage();
+        expect(body, contains('failed'));
+        expect(body, contains('could not reach <phone>'));
+        expect(body, contains('STACK TRACE'));
+        expect(body, isNot(contains('699887766')));
+        expect(record.logLevel, LogLevel.error);
+      });
+
+      test('says the same thing without a redactor, unscrubbed', () {
+        // The control: the wire carries the error with no `redact` at all, so
+        // a scrubbed record that lost it changed what is sent, not only what
+        // is scrubbed.
+        final TalkerData record = failRecords().single;
+
+        expect(record, isA<RiverpodFailLog>());
+        expect(
+          record.generateTextMessage(),
+          contains('could not reach 699887766'),
+        );
+      });
     });
 
     test('a throwing redactor drops the record and does not throw', () {
