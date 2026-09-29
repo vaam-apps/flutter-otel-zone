@@ -93,15 +93,20 @@ Both return `null` when the SDK is not up, which is why they are spread
 null-aware rather than listed plainly.
 
 Neither observer records what the app's data looks like unless asked:
-`riverpodObserver()` leaves out provider values (`recordValues`) and family
-arguments (`recordArguments`), and `routeObserver()` leaves out route
-arguments (`recordArguments`). Each provider span still carries the provider's
-name and type, the value's runtime type, and — for a failed provider — the
-error's message and stack trace, so those spans are not free of app text; see
-the next section for what scrubs them. The family argument is dropped by this
-package rather than by `otel_riverpod`, whose 0.2.0 observer records it
-whatever `recordValues` says
-([Dartastic/otel_riverpod#3](https://github.com/Dartastic/otel_riverpod/issues/3)).
+`riverpodObserver()` leaves out provider values (`recordValues`), family
+arguments and mutation keys (`recordArguments`), and `routeObserver()` leaves
+out route arguments (`recordArguments`). Each provider span still carries the
+provider's name and type, the value's runtime type, and — for a failed
+provider — the error's message and stack trace, so those spans are not free of
+app text; see the next section for what scrubs them.
+
+The two attributes `recordArguments` controls are dropped by this package
+rather than by `otel_riverpod`, whose 0.2.0 observer records both whatever
+`recordValues` says
+([Dartastic/otel_riverpod#3](https://github.com/Dartastic/otel_riverpod/issues/3)):
+`riverpod.provider.argument` is the family argument's `toString()`, and
+`riverpod.mutation` is the mutation's, which for a keyed mutation is
+`Mutation<int>#d9771(<key>, label: addToCart)`, key included.
 
 And around anything that emits a span of its own:
 
@@ -142,17 +147,31 @@ scrubbed by it: the message, the title, the error/exception text, the stack
 trace, and each breadcrumb line. It runs *before* truncation and before the
 record reaches the exporter, so nothing unredacted can be persisted or sent.
 
+**What `redact` is handed is one field at a time**, never a rendered record: a
+message, a title, an error's text, a stack trace's text and, for a span, one
+attribute value, one event attribute or one status description each. So a
+whole-value pattern such as `^\+?\d{9,12}$` matches a phone number field, as
+it would on a string of its own. The exceptions are a breadcrumb line, which is
+`time [title] message`, and a `[riverpod-fail]` record, whose error and stack
+trace live only in `RiverpodFailLog`'s own fields and are scrubbed one by one
+and then laid out as that record lays them out. A record kind that renders
+more than `TalkerData` does (an HTTP logger's headers or response body) sends
+only the title, time, message and stack trace when `redact` is set.
+
 **Spans are scrubbed too.** Every string a span exports goes through `redact`:
 attribute values (each element of a string-list value as well), the attributes
 of each span event — which is where a recorded exception's message and stack
 trace are — and of each link, the status description, and the span name.
 Attribute keys, event names and non-text values are the span's schema and are
-left alone. A span whose scrub throws is dropped, as a record is. To do this
+left alone. A span whose scrub throws is dropped, as a record is, and the first
+such drop is one warning on the talker (its type, never its text). To do this
 the package builds the trace pipeline itself when `redact` is set, from the
 same `OTEL_TRACES_EXPORTER` and `OTEL_EXPORTER_OTLP_*` variables dartastic
 reads (`otlp` over HTTP or gRPC, and `console`); without `redact` it is
 dartastic's own, untouched. Spans do not go through the export floor or the
-spool.
+spool. The scrub runs synchronously on the isolate that exports, which is the UI
+isolate: a review measured about 38 ms for a 512-span batch with three regular
+expressions, so keep the redactor cheap.
 
 ```dart
 final OtelZone observability = OtelZone(

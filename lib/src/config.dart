@@ -7,11 +7,21 @@ import 'export-floor.dart';
 /// One function that scrubs a single string of anything that must not leave
 /// the device.
 ///
-/// It is applied to every exported record's message, title, error/exception
-/// text, stack trace, and each breadcrumb line — the whole of what an
-/// `OTelTalkerObserver` puts on the wire — and to every string a span carries:
-/// attribute values, event attributes (a recorded exception's message and
-/// stack trace), link attributes, the status description and the span name.
+/// It is handed one field at a time, never a rendered record, so a whole-value
+/// pattern such as `^\+?\d{9,12}$` matches a field as it would a string of its
+/// own. For a log record the fields are the message, the title, the
+/// error/exception text and the stack trace's text. A breadcrumb line is
+/// `time [title] message`, and a `[riverpod-fail]` record's error and stack
+/// trace (which live only in that record's own fields) are scrubbed one by one
+/// and then laid out as it lays them out. A record kind that renders more than
+/// `TalkerData` does sends only the title, time, message and stack trace when
+/// a redactor is set. For a span the
+/// fields are each attribute value (and each element of a string list), each
+/// event and link attribute (a recorded exception's message and stack trace),
+/// the status description and the name.
+///
+/// It runs synchronously, on the isolate that exports (the UI isolate in a
+/// Flutter app), so keep it cheap.
 ///
 /// ```dart
 /// String scrubPhoneNumbers(String input) =>
@@ -127,7 +137,8 @@ final class OtelZoneConfig {
   /// description and the name. Keys, event names and non-text values are left
   /// alone. With a [redact] set, [OtelZone.start] builds the trace pipeline
   /// itself, from the same `OTEL_TRACES_EXPORTER` and `OTEL_EXPORTER_OTLP_*`
-  /// variables dartastic reads; without one, dartastic's own is used.
+  /// variables dartastic reads; without one, dartastic's own is used. The
+  /// first span a throwing [redact] drops is one warning on the talker.
   ///
   /// It does not reach the raw crash files the Android and iOS code write
   /// before Dart runs (in no-backup storage, deleted once acknowledged); the

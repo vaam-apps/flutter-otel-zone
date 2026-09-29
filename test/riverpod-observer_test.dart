@@ -9,6 +9,7 @@
 import 'package:dartastic_opentelemetry/dartastic_opentelemetry.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otel_zone/otel_zone.dart';
+import 'package:riverpod/experimental/mutation.dart';
 import 'package:riverpod/riverpod.dart';
 
 import 'support/local-collector.dart';
@@ -104,5 +105,45 @@ void main() {
 
     expect(wire, contains('provider.added:'));
     expect(wire, isNot(contains('state-secret')));
+  });
+
+  group('a keyed mutation', () {
+    // `otel_riverpod` records `mutation.toString()` as `riverpod.mutation`,
+    // and a keyed mutation renders its key there:
+    // `Mutation<int>#d9771(+237690000001, label: addToCart)`.
+    final Mutation<int> addToCart = Mutation<int>(label: 'addToCart');
+    final Provider<int> cart = Provider<int>((Ref ref) => 1);
+
+    Future<String> wireOfMutation(ProviderObserver? observer) async {
+      final ProviderContainer container = ProviderContainer(
+        observers: <ProviderObserver>[?observer],
+      );
+      addTearDown(container.dispose);
+      return wireAfter(
+        () => addToCart(
+          'mutation-key-nobody-typed',
+        ).run(container, (MutationTransaction tsx) async => tsx.get(cart)),
+      );
+    }
+
+    test(
+      'is recorded by the upstream observer, so the test below can fail',
+      () async {
+        final String wire = await wireOfMutation(
+          zone.riverpodObserver(recordArguments: true),
+        );
+
+        expect(wire, contains('riverpod.mutation'));
+        expect(wire, contains('mutation-key-nobody-typed'));
+      },
+    );
+
+    test('leaves its key off the wire by default', () async {
+      final String wire = await wireOfMutation(zone.riverpodObserver());
+
+      expect(wire, contains('provider.added:'));
+      expect(wire, isNot(contains('mutation-key-nobody-typed')));
+      expect(wire, isNot(contains('riverpod.mutation')));
+    });
   });
 }

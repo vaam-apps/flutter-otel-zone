@@ -6,19 +6,22 @@ import 'package:riverpod/riverpod.dart'
     show ProviderObserver, ProviderObserverContext;
 
 /// Marks the call stack of an observer callback whose spans must not carry
-/// the provider's family argument. A zone value, so it is scoped to exactly
+/// the provider's family argument or a keyed mutation's key. A zone value, so it is scoped to exactly
 /// the spans that observer starts and to nothing else in the process.
 const Symbol _dropArgument = #otelZoneDropRiverpodArgument;
 
 /// Wraps [inner] so that the spans it starts do not carry
-/// `riverpod.provider.argument`.
+/// `riverpod.provider.argument` or `riverpod.mutation`.
 ///
 /// `otel_riverpod` 0.2.0 records `argument.toString()` on every provider span
 /// whether or not `recordValues` is set, and offers no option to turn it off
 /// (reported upstream). A family argument is often what a user typed, so this
-/// package drops the attribute itself until that is fixed there.
+/// package drops the attribute itself until that is fixed there. The same goes
+/// for `riverpod.mutation`, which is `mutation.toString()`: for a keyed
+/// mutation that is `Mutation<int>#d9771(<key>, label: addToCart)`, with the
+/// key in it.
 ///
-/// The drop is a span processor that removes the attribute in `onStart`, while
+/// The drop is a span processor that removes the attributes in `onStart`, while
 /// the span is still open; it acts only on spans started inside a callback of
 /// the returned observer, so a second observer built with the opt-in in the
 /// same process is unaffected. The processor is added to the tracer provider
@@ -33,20 +36,27 @@ ProviderObserver withoutProviderArguments(ProviderObserver inner) {
   return _ArgumentlessProviderObserver(inner);
 }
 
-/// Removes `riverpod.provider.argument` from a span started under
-/// [_dropArgument].
+/// Removes `riverpod.provider.argument` and `riverpod.mutation` from a span
+/// started under [_dropArgument].
 final class _ProviderArgumentStripper implements SpanProcessor {
+  static final List<String> _dropped = <String>[
+    RiverpodSemantics.providerArgument.key,
+    RiverpodSemantics.mutation.key,
+  ];
+
   @override
   Future<void> onStart(Span span, Context? parentContext) async {
     // No `await` before this line: `Tracer.startSpan` calls `onStart` without
     // waiting, and the zone value is only visible on its synchronous part.
     if (Zone.current[_dropArgument] != true) return;
     // ignore: invalid_use_of_visible_for_testing_member
-    final Attributes attributes = span.attributes;
-    final String key = RiverpodSemantics.providerArgument.key;
-    if (attributes.keys.contains(key)) {
-      span.attributes = attributes.copyWithout(key);
+    Attributes attributes = span.attributes;
+    for (final String key in _dropped) {
+      if (attributes.keys.contains(key)) {
+        attributes = attributes.copyWithout(key);
+      }
     }
+    span.attributes = attributes;
   }
 
   @override

@@ -29,15 +29,31 @@ import 'otlp-exporter.dart';
 ///
 /// A [redact] that throws for a span drops that span. It never lets the
 /// unscrubbed one through and never throws into the SDK.
+///
+/// ## Cost
+///
+/// [redact] runs synchronously, on the isolate that exports, which in a
+/// Flutter app is the UI isolate. A reviewer measured about 38 ms for a
+/// 512-span batch with three regular expressions. Keep the redactor cheap.
 final class RedactingSpanExporter implements SpanExporter {
   /// Wraps [delegate], scrubbing every span with [redact] first.
-  RedactingSpanExporter({required SpanExporter delegate, required this.redact})
-    : _delegate = delegate;
+  ///
+  /// [onDropped] is told about the first span a throwing [redact] made this
+  /// exporter drop, and never again: a redactor that always throws would
+  /// otherwise report once per span.
+  RedactingSpanExporter({
+    required SpanExporter delegate,
+    required this.redact,
+    void Function(Object error)? onDropped,
+  }) : _delegate = delegate,
+       _onDropped = onDropped;
 
   /// The scrubber applied to every string a span carries.
   final Redactor redact;
 
   final SpanExporter _delegate;
+  final void Function(Object error)? _onDropped;
+  bool _reportedDrop = false;
 
   @override
   Future<void> export(List<Span> spans) {
@@ -45,12 +61,23 @@ final class RedactingSpanExporter implements SpanExporter {
     for (final Span span in spans) {
       try {
         scrubbed.add(_RedactedSpan(span, redact));
-      } on Object {
+      } on Object catch (error) {
         // Fail closed: one span the redactor cannot scrub is not exported.
+        _reportDrop(error);
       }
     }
     if (scrubbed.isEmpty) return Future<void>.value();
     return _delegate.export(scrubbed);
+  }
+
+  void _reportDrop(Object error) {
+    if (_reportedDrop) return;
+    _reportedDrop = true;
+    try {
+      _onDropped?.call(error);
+    } on Object {
+      // Reporting is best-effort and never costs the export.
+    }
   }
 
   @override
@@ -67,6 +94,7 @@ final class RedactingSpanExporter implements SpanExporter {
 final class _RedactedSpan implements Span {
   _RedactedSpan(this._span, Redactor redact)
     : name = redact(_span.name),
+      instrumentationScope = _scrubScope(_span.instrumentationScope, redact),
       // ignore: invalid_use_of_visible_for_testing_member
       attributes = _scrubAttributes(_span.attributes, redact),
       spanEvents = _scrubEvents(_span.spanEvents, redact),
@@ -135,8 +163,12 @@ final class _RedactedSpan implements Span {
   @override
   SpanKind get kind => _span.kind;
 
+  /// `null`, not the raw parent: the parent is another span whose text has not
+  /// been scrubbed. The OTLP transformer takes the parent's id from
+  /// `spanContext.parentSpanId` when there is no parent object, so the link
+  /// survives.
   @override
-  APISpan? get parentSpan => _span.parentSpan;
+  APISpan? get parentSpan => null;
 
   @override
   void recordException(
@@ -206,8 +238,12 @@ final class _RedactedSpan implements Span {
   @override
   void updateName(String name) => _span.updateName(name);
 
+  /// A copy whose attributes are scrubbed. The OTLP exporters send only the
+  /// scope's name and version, but they log the whole span on request, and
+  /// dartastic fills a span's scope attributes from the ones the span started
+  /// with.
   @override
-  InstrumentationScope get instrumentationScope => _span.instrumentationScope;
+  final InstrumentationScope instrumentationScope;
 
   @override
   SpanContext? get parentSpanContext => _span.parentSpanContext;
@@ -218,8 +254,48 @@ final class _RedactedSpan implements Span {
   @override
   bool isInstanceOf(Type type) => _span.isInstanceOf(type);
 
+  /// Scrubbed like everything else: the OTLP exporters log `$spans` when
+  /// `OTEL_DART_LOG_SPANS` is set, and that must not print the raw span.
   @override
-  String toString() => _span.toString();
+  String toString() =>
+      'Span { name: $name, spanContext: $spanContext, kind: $kind, '
+      'instrumentationScope: $instrumentationScope, startTime: $startTime, '
+      'endTime: $endTime, status: $status, '
+      'statusDescription: $statusDescription, attributes: $attributes, '
+      'spanEvents: $spanEvents, spanLinks: $spanLinks }';
+}
+
+InstrumentationScope _scrubScope(InstrumentationScope scope, Redactor redact) {
+  final Attributes? attributes = scope.attributes;
+  if (attributes == null) return scope;
+  return _ScrubbedScope(scope, _scrubAttributes(attributes, redact));
+}
+
+/// [_scope] with scrubbed [attributes], and everything else as it was. It
+/// implements the class rather than building one, because dartastic's factory
+/// turns an absent version into `1.0.0`, and the version is part of what
+/// groups spans on the wire.
+final class _ScrubbedScope implements InstrumentationScope {
+  _ScrubbedScope(this._scope, this.attributes);
+
+  final InstrumentationScope _scope;
+
+  @override
+  final Attributes attributes;
+
+  @override
+  String get name => _scope.name;
+
+  @override
+  String? get version => _scope.version;
+
+  @override
+  String? get schemaUrl => _scope.schemaUrl;
+
+  @override
+  String toString() =>
+      'InstrumentationScope{name: $name, version: $version, '
+      'schemaUrl: $schemaUrl, attributes: $attributes}';
 }
 
 /// [attributes] with every string value, and every element of a string-list
@@ -274,6 +350,97 @@ List<SpanLink>? _scrubLinks(List<SpanLink>? links, Redactor redact) {
   ];
 }
 
+/// The OTLP/HTTP configuration for the trace exporter, read from the
+/// environment the way `TracesConfiguration.configureTracerProvider` reads it.
+OtlpHttpExporterConfig traceHttpConfig({required String endpoint}) {
+  final OtlpEnvironmentValues env = OTelEnv.getOtlpConfig(signal: 'traces');
+  return OtlpHttpExporterConfig(
+    endpoint: env.endpoint ?? endpoint,
+    headers: resolveOtlpHeaders(signal: 'traces'),
+    timeout: env.timeout ?? const Duration(seconds: 10),
+    compression: env.compression == 'gzip',
+    certificate: env.certificate,
+    clientKey: env.clientKey,
+    clientCertificate: env.clientCertificate,
+    protocol:
+        otlpHttpProtocolFromString(env.protocol ?? 'http/protobuf') ??
+        OtlpHttpProtocol.httpProtobuf,
+  );
+}
+
+/// The OTLP/gRPC counterpart of [traceHttpConfig].
+OtlpGrpcExporterConfig traceGrpcConfig({
+  required String endpoint,
+  required bool secure,
+}) {
+  final OtlpEnvironmentValues env = OTelEnv.getOtlpConfig(signal: 'traces');
+  final String resolved = env.endpoint ?? endpoint;
+  return OtlpGrpcExporterConfig(
+    endpoint: resolved,
+    insecure: !OTelEnv.resolveOtlpSecure(
+      envInsecure: env.insecure,
+      endpoint: resolved,
+      explicitSecure: secure,
+    ),
+    headers: resolveOtlpHeaders(signal: 'traces'),
+    timeout: env.timeout ?? const Duration(seconds: 10),
+    compression: env.compression == 'gzip',
+    certificate: env.certificate,
+    clientKey: env.clientKey,
+    clientCertificate: env.clientCertificate,
+  );
+}
+
+/// The OTLP trace exporter the environment asks for: gRPC when
+/// `OTEL_EXPORTER_OTLP_[TRACES_]PROTOCOL` says `grpc`, HTTP otherwise.
+SpanExporter buildOtlpTraceExporter({
+  required String endpoint,
+  required bool secure,
+}) {
+  final String protocol =
+      OTelEnv.getOtlpConfig(signal: 'traces').protocol ?? 'http/protobuf';
+  return protocol == 'grpc'
+      ? OtlpGrpcSpanExporter(
+          traceGrpcConfig(endpoint: endpoint, secure: secure),
+        )
+      : OtlpHttpSpanExporter(traceHttpConfig(endpoint: endpoint));
+}
+
+/// The exporter for the trace pipeline [buildRedactingSpanProcessor] builds:
+/// every exporter `OTEL_TRACES_EXPORTER` names, behind one
+/// [RedactingSpanExporter], or `null` when it says `none`.
+///
+/// Names are `otlp` and `console`. One that is neither is ignored, and an
+/// empty result falls back to `otlp`, as dartastic's does.
+RedactingSpanExporter? buildRedactingTraceExporter({
+  required String endpoint,
+  required bool secure,
+  required Redactor redact,
+  void Function(Object error)? onDropped,
+}) {
+  final List<String> names =
+      OTelEnv.getExporters(signal: 'traces') ?? const <String>['otlp'];
+  if (names.contains('none')) return null;
+
+  final List<SpanExporter> exporters = <SpanExporter>[
+    for (final String name in names)
+      if (name == 'otlp')
+        buildOtlpTraceExporter(endpoint: endpoint, secure: secure)
+      else if (name == 'console')
+        ConsoleExporter(),
+  ];
+  if (exporters.isEmpty) {
+    exporters.add(buildOtlpTraceExporter(endpoint: endpoint, secure: secure));
+  }
+  return RedactingSpanExporter(
+    delegate: exporters.length == 1
+        ? exporters.single
+        : CompositeExporter(exporters),
+    redact: redact,
+    onDropped: onDropped,
+  );
+}
+
 /// The trace pipeline to hand `OTel.initialize` when [redact] is set, or
 /// `null` when dartastic's own should stand (`OTEL_TRACES_EXPORTER=none`).
 ///
@@ -285,73 +452,23 @@ List<SpanLink>? _scrubLinks(List<SpanLink>? links, Redactor redact) {
 /// [redact] is configured; a build without one keeps dartastic's own pipeline
 /// untouched.
 ///
-/// `OTEL_TRACES_EXPORTER` names are `otlp` (HTTP or gRPC, by
-/// `OTEL_EXPORTER_OTLP_[TRACES_]PROTOCOL`) and `console`. A name that is
-/// neither is ignored, and an empty result falls back to `otlp`, as
-/// dartastic's does.
+/// The returned processor starts a timer, so a caller that ends up not
+/// installing it has to `shutdown()` it.
 SpanProcessor? buildRedactingSpanProcessor({
   required String endpoint,
   required bool secure,
   required Redactor redact,
+  void Function(Object error)? onDropped,
 }) {
-  final List<String> names =
-      OTelEnv.getExporters(signal: 'traces') ?? const <String>['otlp'];
-  if (names.contains('none')) return null;
-
-  SpanExporter otlp() {
-    final OtlpEnvironmentValues env = OTelEnv.getOtlpConfig(signal: 'traces');
-    final String protocol = env.protocol ?? 'http/protobuf';
-    final String resolvedEndpoint = env.endpoint ?? endpoint;
-    final Map<String, String> headers = resolveOtlpHeaders(signal: 'traces');
-    final Duration timeout = env.timeout ?? const Duration(seconds: 10);
-    final bool gzip = env.compression == 'gzip';
-    if (protocol == 'grpc') {
-      return OtlpGrpcSpanExporter(
-        OtlpGrpcExporterConfig(
-          endpoint: resolvedEndpoint,
-          insecure: !OTelEnv.resolveOtlpSecure(
-            envInsecure: env.insecure,
-            endpoint: resolvedEndpoint,
-            explicitSecure: secure,
-          ),
-          headers: headers,
-          timeout: timeout,
-          compression: gzip,
-          certificate: env.certificate,
-          clientKey: env.clientKey,
-          clientCertificate: env.clientCertificate,
-        ),
-      );
-    }
-    return OtlpHttpSpanExporter(
-      OtlpHttpExporterConfig(
-        endpoint: resolvedEndpoint,
-        headers: headers,
-        timeout: timeout,
-        compression: gzip,
-        certificate: env.certificate,
-        clientKey: env.clientKey,
-        clientCertificate: env.clientCertificate,
-        protocol:
-            otlpHttpProtocolFromString(protocol) ??
-            OtlpHttpProtocol.httpProtobuf,
-      ),
-    );
-  }
-
-  final List<SpanExporter> exporters = <SpanExporter>[
-    for (final String name in names)
-      if (name == 'otlp') otlp() else if (name == 'console') ConsoleExporter(),
-  ];
-  if (exporters.isEmpty) exporters.add(otlp());
-
+  final RedactingSpanExporter? exporter = buildRedactingTraceExporter(
+    endpoint: endpoint,
+    secure: secure,
+    redact: redact,
+    onDropped: onDropped,
+  );
+  if (exporter == null) return null;
   return BatchSpanProcessor(
-    RedactingSpanExporter(
-      delegate: exporters.length == 1
-          ? exporters.single
-          : CompositeExporter(exporters),
-      redact: redact,
-    ),
+    exporter,
     BatchSpanProcessorConfig.fromBspEnvironmentValues(OTelEnv.getBspConfig()),
   );
 }

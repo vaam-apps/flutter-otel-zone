@@ -20,6 +20,13 @@ void main() {
   test('a span with PII in it reaches the collector scrubbed', () async {
     final LocalCollector collector = await LocalCollector.start();
     addTearDown(collector.close);
+    // The credentials the collector needs. The rebuilt trace pipeline has to
+    // read them from the same variables dartastic's own does, or spans reach a
+    // collector that wants a token without it.
+    EnvironmentService.testOverrides = <String, String>{
+      'OTEL_EXPORTER_OTLP_TRACES_HEADERS': 'x-trace-token=s3cret',
+    };
+    addTearDown(() => EnvironmentService.testOverrides = null);
     final OtelZone zone = OtelZone(
       OtelZoneConfig(
         serviceName: 'span-wire-test',
@@ -68,5 +75,14 @@ void main() {
     expect(wire, contains('unreachable <phone>'));
     expect(wire, contains('provider.failed:'));
     expect(wire, isNot(contains('699887766')));
+
+    // The spans travelled with the credentials.
+    expect(
+      collector.requests.any(
+        (CollectedRequest r) => r.headers['x-trace-token'] == 's3cret',
+      ),
+      isTrue,
+      reason: 'no request carried OTEL_EXPORTER_OTLP_TRACES_HEADERS',
+    );
   });
 }

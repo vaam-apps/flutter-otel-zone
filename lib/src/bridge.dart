@@ -1,5 +1,7 @@
 import 'package:otel_talker/otel_talker.dart';
 import 'package:talker/talker.dart';
+import 'package:talker_riverpod_logger/talker_riverpod_logger.dart'
+    show RiverpodFailLog;
 
 import 'config.dart';
 import 'export-floor.dart';
@@ -163,10 +165,9 @@ class OtelBridge extends TalkerObserver {
     );
   }
 
-  /// A copy of [data] with every string scrubbed and its rendering scrubbed,
-  /// the original object when
-  /// there is no [redact], or `null` when the redactor threw — which drops
-  /// the record.
+  /// A copy of [data] with every string field scrubbed on its own, the
+  /// original object when there is no [redact], or `null` when the redactor
+  /// threw — which drops the record.
   ///
   /// Only ever called for a record that clears the floor, so a build's
   /// scrubbing cost is proportional to what it actually exports.
@@ -189,24 +190,21 @@ class OtelBridge extends TalkerObserver {
               data.exception!.runtimeType.toString(),
               redact(data.exception!.toString()),
             );
-      return _RedactedRecord(
-        redact(data.message ?? ''),
-        // What the original would have put on the wire, scrubbed. The sink
-        // renders a record's body with `generateTextMessage()`, and a subclass
-        // may keep what it renders in fields of its own — `talker_riverpod_logger`'s
-        // `RiverpodFailLog` holds its error and stack trace in `providerError`
-        // and `providerStackTrace`, none of the fields copied here — so
-        // scrubbing the fields alone would send "xProvider failed" and nothing
-        // else. Rendered once, inside this `try`, so a redactor that throws
-        // drops the record like it does for every other field.
-        rendered: redact(data.generateTextMessage()),
+      final String message = redact(data.message ?? '');
+      final String? title = data.title == null ? null : redact(data.title!);
+      final StackTrace? stackTrace = data.stackTrace == null
+          ? null
+          : _RedactedStackTrace(redact(data.stackTrace.toString()));
+      if (data is RiverpodFailLog) {
+        return _redactedFailLog(data, redact, message: message, title: title);
+      }
+      return TalkerData(
+        message,
         logLevel: data.logLevel,
         error: error,
         exception: exception,
-        stackTrace: data.stackTrace == null
-            ? null
-            : _RedactedStackTrace(redact(data.stackTrace.toString())),
-        title: data.title == null ? null : redact(data.title!),
+        stackTrace: stackTrace,
+        title: title,
         time: data.time,
         key: data.key,
       );
@@ -305,31 +303,60 @@ class OtelBridge extends TalkerObserver {
   }
 }
 
-/// A scrubbed copy of a record, whose rendering is the original's, scrubbed.
+/// A scrubbed `[riverpod-fail]` record.
 ///
-/// Every field is redacted as before; only `generateTextMessage()` differs
-/// from a plain `TalkerData`, so a record kind that renders more than its own
-/// message keeps that content on the wire.
-class _RedactedRecord extends TalkerData {
-  _RedactedRecord(
+/// `talker_riverpod_logger`'s `RiverpodFailLog` keeps its error and stack
+/// trace in fields of its own, `providerError` and `providerStackTrace`, that
+/// exist nowhere on `TalkerData`, and renders them in `generateTextMessage()`,
+/// which is what the sink puts on the wire as the body. A plain copy of the
+/// base fields therefore sends "xProvider failed" and nothing else, so this
+/// keeps the rendering — composed from the pieces, each scrubbed on its own,
+/// never by scrubbing one rendered blob (an anchored redactor such as
+/// `^\d{9}$` matches a whole value, not a paragraph).
+class _RedactedFailLog extends TalkerData {
+  _RedactedFailLog(
     super.message, {
     required this.rendered,
     super.logLevel,
-    super.error,
-    super.exception,
-    super.stackTrace,
     super.title,
     super.time,
     super.key,
   });
 
-  /// The original's `generateTextMessage()`, scrubbed.
+  /// The record's rendering, composed from scrubbed parts.
   final String rendered;
 
   @override
   String generateTextMessage({
     TimeFormat timeFormat = TimeFormat.timeAndSeconds,
   }) => rendered;
+}
+
+/// [log] as a [_RedactedFailLog], in the shape `RiverpodFailLog` renders:
+/// title and time, the message, `ERROR:` and the error (its type alone when
+/// the logger's `printFailFullData` is off), `STACK TRACE:` and the trace.
+TalkerData _redactedFailLog(
+  RiverpodFailLog log,
+  Redactor redact, {
+  required String message,
+  required String? title,
+}) {
+  final String error = log.settings.printFailFullData
+      ? '\n${redact(log.providerError.toString())}'
+      : log.providerError.runtimeType.toString();
+  final String stackTrace = redact(log.providerStackTrace.toString());
+  return _RedactedFailLog(
+    message,
+    rendered:
+        '[$title] | ${log.displayTime()} | '
+        '\n$message'
+        '\nERROR: \n$error'
+        '\nSTACK TRACE: \n$stackTrace',
+    logLevel: log.logLevel,
+    title: title,
+    time: log.time,
+    key: log.key,
+  );
 }
 
 /// A scrubbed stand-in for an `Error`, carrying only redacted text.

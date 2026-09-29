@@ -166,7 +166,14 @@ void main() {
       expect(exported.kind, span.kind);
       expect(exported.startTime, span.startTime);
       expect(exported.endTime, span.endTime);
-      expect(exported.instrumentationScope, span.instrumentationScope);
+      expect(
+        exported.instrumentationScope.name,
+        span.instrumentationScope.name,
+      );
+      expect(
+        exported.instrumentationScope.version,
+        span.instrumentationScope.version,
+      );
       expect(exported.resource, span.resource);
     });
 
@@ -213,15 +220,96 @@ void main() {
     });
   });
 
+  group('what the view does not hand on', () {
+    test('its toString is scrubbed, for the exporters that log `\$spans`', () {
+      final Span span = start(
+        'lookup 699887766',
+        attributes: OTel.attributesFromMap(<String, Object>{
+          'user.phone': '699887766',
+        }),
+      );
+      span.recordException(StateError('bad 699887766'));
+      span.setStatus(SpanStatusCode.Error, 'no route to 699887766');
+      span.end();
+
+      final String printed = '${capture.spans}';
+      expect(printed, contains('<phone>'));
+      expect(printed, isNot(contains('699887766')));
+    });
+
+    test('has no parent object, and the OTLP parent id is still there', () {
+      final Span parent = start('parent 699887766');
+      final Span child = OTel.tracerProvider()
+          .getTracer('span-redaction-test')
+          .startSpan('child', context: Context.current.withSpan(parent));
+      child.end();
+      parent.end();
+
+      final Span exported = capture.spans.firstWhere(
+        (Span s) => s.name == 'child',
+      );
+      // The raw parent carries the unscrubbed name and attributes; the view
+      // must not hand it on.
+      expect(exported.parentSpan, isNull);
+      // What the OTLP exporters actually send: the transformer they share.
+      expect(
+        OtlpSpanTransformer.transformSpan(exported).parentSpanId,
+        parent.spanContext.spanId.bytes,
+      );
+    });
+  });
+
+  group('a redactor that throws', () {
+    test('is reported once, however many spans it drops', () async {
+      final List<Object> reported = <Object>[];
+      final RedactingSpanExporter exporter = RedactingSpanExporter(
+        delegate: capture,
+        redact: (String input) => throw StateError('no scrubber today'),
+        onDropped: reported.add,
+      );
+      final Span first = start('one')..end();
+      final Span second = start('two')..end();
+      capture.spans.clear();
+
+      await exporter.export(<Span>[first]);
+      await exporter.export(<Span>[second]);
+
+      expect(capture.spans, isEmpty);
+      expect(reported, hasLength(1));
+      expect(reported.single, isA<StateError>());
+    });
+
+    test('and a reporter that throws costs the export nothing', () async {
+      final RedactingSpanExporter exporter = RedactingSpanExporter(
+        delegate: capture,
+        redact: (String input) => throw StateError('no scrubber today'),
+        onDropped: (Object error) => throw StateError('no reporter either'),
+      );
+      final Span span = start('one')..end();
+      capture.spans.clear();
+
+      await expectLater(exporter.export(<Span>[span]), completes);
+    });
+  });
+
   group('the pipeline OtelZone builds when redact is set', () {
+    const String endpoint = 'http://127.0.0.1:4318';
     tearDown(() => EnvironmentService.testOverrides = null);
 
-    test('is a batch processor by default', () {
+    RedactingSpanExporter? exporter() => buildRedactingTraceExporter(
+      endpoint: endpoint,
+      secure: false,
+      redact: scrub,
+    );
+
+    test('puts the redactor in front of the exporter, and a batch processor '
+        'around that', () {
       EnvironmentService.testOverrides = <String, String>{};
 
+      expect(exporter(), isA<RedactingSpanExporter>());
       expect(
         buildRedactingSpanProcessor(
-          endpoint: 'http://127.0.0.1:4318',
+          endpoint: endpoint,
           secure: false,
           redact: scrub,
         ),
@@ -234,9 +322,10 @@ void main() {
         'OTEL_TRACES_EXPORTER': 'none',
       };
 
+      expect(exporter(), isNull);
       expect(
         buildRedactingSpanProcessor(
-          endpoint: 'http://127.0.0.1:4318',
+          endpoint: endpoint,
           secure: false,
           redact: scrub,
         ),
@@ -244,26 +333,117 @@ void main() {
       );
     });
 
-    test('honours the console exporter, the gRPC protocol and an unknown '
-        'name like dartastic does', () {
-      for (final Map<String, String> env in <Map<String, String>>[
-        <String, String>{'OTEL_TRACES_EXPORTER': 'console'},
-        <String, String>{'OTEL_TRACES_EXPORTER': 'otlp,console'},
-        <String, String>{'OTEL_EXPORTER_OTLP_PROTOCOL': 'grpc'},
-        <String, String>{'OTEL_EXPORTER_OTLP_PROTOCOL': 'http/json'},
-        <String, String>{'OTEL_TRACES_EXPORTER': 'zipkin'},
+    test('a console exporter, or an unknown name, still gets the redactor', () {
+      for (final String names in <String>[
+        'console',
+        'otlp,console',
+        'zipkin',
       ]) {
-        EnvironmentService.testOverrides = env;
-        expect(
-          buildRedactingSpanProcessor(
-            endpoint: 'http://127.0.0.1:4318',
-            secure: false,
-            redact: scrub,
-          ),
-          isA<BatchSpanProcessor>(),
-          reason: '$env',
-        );
+        EnvironmentService.testOverrides = <String, String>{
+          'OTEL_TRACES_EXPORTER': names,
+        };
+
+        expect(exporter(), isA<RedactingSpanExporter>(), reason: names);
       }
+    });
+
+    test('picks the exporter by protocol', () {
+      EnvironmentService.testOverrides = <String, String>{};
+      expect(
+        buildOtlpTraceExporter(endpoint: endpoint, secure: false),
+        isA<OtlpHttpSpanExporter>(),
+      );
+
+      EnvironmentService.testOverrides = <String, String>{
+        'OTEL_EXPORTER_OTLP_PROTOCOL': 'grpc',
+      };
+      expect(
+        buildOtlpTraceExporter(endpoint: endpoint, secure: false),
+        isA<OtlpGrpcSpanExporter>(),
+      );
+    });
+
+    // The two configurations below are what the exporters are built from.
+    // Each field is read from a variable dartastic's own pipeline honours, so
+    // a field dropped here would send spans without the credentials, the
+    // trust or the wire format the rest of the app's telemetry has.
+    test('the HTTP exporter carries headers, TLS, timeout, compression, '
+        'protocol and endpoint', () {
+      EnvironmentService.testOverrides = <String, String>{
+        'OTEL_EXPORTER_OTLP_HEADERS': 'x-general=1',
+        'OTEL_EXPORTER_OTLP_TRACES_HEADERS': 'x-traces=2',
+        'OTEL_EXPORTER_OTLP_CERTIFICATE': 'test://ca',
+        'OTEL_EXPORTER_OTLP_CLIENT_KEY': 'test://key',
+        'OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE': 'test://cert',
+        'OTEL_EXPORTER_OTLP_TIMEOUT': '1234',
+        'OTEL_EXPORTER_OTLP_COMPRESSION': 'gzip',
+        'OTEL_EXPORTER_OTLP_PROTOCOL': 'http/json',
+        'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT': 'http://collector.test:4318',
+      };
+
+      final OtlpHttpExporterConfig config = traceHttpConfig(endpoint: endpoint);
+
+      expect(config.headers, <String, String>{'x-traces': '2'});
+      expect(config.certificate, 'test://ca');
+      expect(config.clientKey, 'test://key');
+      expect(config.clientCertificate, 'test://cert');
+      expect(config.timeout, const Duration(milliseconds: 1234));
+      expect(config.compression, isTrue);
+      expect(config.protocol, OtlpHttpProtocol.httpJson);
+      expect(config.endpoint, 'http://collector.test:4318');
+    });
+
+    test('and falls back to the configured endpoint and the defaults', () {
+      EnvironmentService.testOverrides = <String, String>{};
+
+      final OtlpHttpExporterConfig config = traceHttpConfig(endpoint: endpoint);
+
+      expect(config.endpoint, endpoint);
+      expect(config.headers, isEmpty);
+      expect(config.protocol, OtlpHttpProtocol.httpProtobuf);
+      expect(config.compression, isFalse);
+      expect(config.timeout, const Duration(seconds: 10));
+    });
+
+    test('the gRPC exporter carries headers, TLS, timeout and compression', () {
+      EnvironmentService.testOverrides = <String, String>{
+        'OTEL_EXPORTER_OTLP_PROTOCOL': 'grpc',
+        'OTEL_EXPORTER_OTLP_HEADERS': 'x-general=1',
+        'OTEL_EXPORTER_OTLP_CERTIFICATE': 'test://ca',
+        'OTEL_EXPORTER_OTLP_CLIENT_KEY': 'test://key',
+        'OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE': 'test://cert',
+        'OTEL_EXPORTER_OTLP_TIMEOUT': '1234',
+        'OTEL_EXPORTER_OTLP_COMPRESSION': 'gzip',
+      };
+
+      final OtlpGrpcExporterConfig config = traceGrpcConfig(
+        endpoint: 'collector.test:4317',
+        secure: true,
+      );
+
+      expect(config.headers, <String, String>{'x-general': '1'});
+      expect(config.certificate, 'test://ca');
+      expect(config.clientKey, 'test://key');
+      expect(config.clientCertificate, 'test://cert');
+      expect(config.timeout, const Duration(milliseconds: 1234));
+      expect(config.compression, isTrue);
+      expect(config.insecure, isFalse);
+    });
+
+    test('gRPC is insecure exactly when the config says it is not secure', () {
+      EnvironmentService.testOverrides = <String, String>{};
+
+      expect(
+        traceGrpcConfig(
+          endpoint: 'collector.test:4317',
+          secure: false,
+        ).insecure,
+        isTrue,
+      );
+      expect(
+        traceGrpcConfig(endpoint: 'collector.test:4317', secure: true).insecure,
+        isFalse,
+      );
     });
   });
 }

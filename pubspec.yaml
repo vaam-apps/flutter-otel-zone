@@ -40,6 +40,11 @@ dependencies:
   # The log sink itself. Not `talker_flutter`: nothing here renders, and an
   # app that wants `TalkerScreen` adds it for its own reasons.
   talker: ^5.1.20
+  # `RiverpodFailLog`, whose error and stack trace live in fields `TalkerData`
+  # does not have, so the bridge has to know the type to scrub and keep them.
+  # It adds nothing to the graph: its own dependencies are `talker`, `riverpod`
+  # and `meta`, all already here.
+  talker_riverpod_logger: ^5.1.20
 
 dev_dependencies:
   flutter_lints: ^6.0.0
@@ -49,10 +54,6 @@ dev_dependencies:
   # Swift protocol — from `pigeons/native_crash.dart`. A dev dependency: the
   # generated output is committed, so building the app does not need it.
   pigeon: ^29.0.4
-  # `RiverpodFailLog` and `TalkerRiverpodObserver`, the real record kind the
-  # bridge's redaction test feeds through it: a fake with the same shape would
-  # keep passing after the real one changed.
-  talker_riverpod_logger: ^5.1.20
 
 flutter:
   # The crash-capture channel needs native code on both platforms, which makes

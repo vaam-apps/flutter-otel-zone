@@ -339,7 +339,10 @@ void main() {
         (Ref ref) => throw StateError('could not reach 699887766'),
       );
 
-      List<TalkerData> failRecords({Redactor? redact}) {
+      List<TalkerData> failRecords({
+        Redactor? redact,
+        void Function(Talker talker)? seeing,
+      }) {
         final RecordingTalkerObserver sink = RecordingTalkerObserver();
         final OtelBridge bridge = OtelBridge(
           floor: const ExportFloor.of(LogLevel.warning),
@@ -356,6 +359,7 @@ void main() {
         );
         addTearDown(container.dispose);
         expect(() => container.read(failing), throwsA(anything));
+        seeing?.call(talker);
         return sink.records
             .where((TalkerData r) => r.key == TalkerKey.riverpodFail)
             .toList();
@@ -372,6 +376,46 @@ void main() {
         expect(record.logLevel, LogLevel.error);
       });
 
+      test(
+        'is scrubbed piece by piece, so an anchored redactor still matches',
+        () {
+          // Whole-value patterns: each of these matches only if the redactor is
+          // handed the error, the message and the trace on their own, and not
+          // one paragraph made of all three.
+          final TalkerData record = failRecords(
+            redact: (String input) => switch (input) {
+              'Bad state: could not reach 699887766' => '<error>',
+              _ when input.startsWith('#0') => '<trace>',
+              _ => input,
+            },
+          ).single;
+
+          final String body = record.generateTextMessage();
+          expect(body, contains('ERROR: \n\n<error>'));
+          expect(body, contains('STACK TRACE: \n<trace>'));
+        },
+      );
+
+      test(
+        'with a redactor that changes nothing renders as the original does',
+        () {
+          // Pins the shape composed here to `RiverpodFailLog`'s own: a rendering
+          // that drifted would show as a difference from the original.
+          late final TalkerData original;
+          final List<TalkerData> scrubbed = failRecords(
+            redact: (String input) => input,
+            seeing: (Talker talker) => original = talker.history.firstWhere(
+              (TalkerData r) => r.key == TalkerKey.riverpodFail,
+            ),
+          );
+
+          expect(
+            scrubbed.single.generateTextMessage(),
+            original.generateTextMessage(),
+          );
+        },
+      );
+
       test('says the same thing without a redactor, unscrubbed', () {
         // The control: the wire carries the error with no `redact` at all, so
         // a scrubbed record that lost it changed what is sent, not only what
@@ -384,6 +428,43 @@ void main() {
           contains('could not reach 699887766'),
         );
       });
+    });
+
+    test('a whole-value redactor matches a field, as it always did', () {
+      // Anchored patterns are the ones a redactor written against a phone
+      // field or a token field uses. Each field reaches `redact` on its own,
+      // so they match; a redactor handed the rendered record would not.
+      final RecordingTalkerObserver sink = RecordingTalkerObserver();
+      final OtelBridge bridge = redactingWith(
+        sink: sink,
+        redact: (String input) =>
+            input.replaceAll(RegExp(r'^\+?\d{9,12}$'), '<phone>'),
+      );
+
+      bridge.onLog(
+        TalkerData('+237699887766', logLevel: LogLevel.warning, title: 'sms'),
+      );
+
+      final TalkerData record = sink.records.single;
+      expect(record.message, '<phone>');
+      expect(record.generateTextMessage(), contains('<phone>'));
+      expect(record.generateTextMessage(), isNot(contains('699887766')));
+    });
+
+    test('what a log kind renders beyond its fields is not sent', () {
+      // A record kind that renders more than `message` (a response body, a
+      // header map) sent nothing of it with a redactor on `main`, and still
+      // sends nothing of it: only `RiverpodFailLog`, whose error and stack
+      // exist nowhere else, is carried through.
+      final RecordingTalkerObserver sink = RecordingTalkerObserver();
+      final OtelBridge bridge = redactingWith(sink: sink, redact: scrub);
+
+      bridge.onLog(_WideLog('POST /login', 'authorization: Bearer 699887766'));
+
+      final String body = sink.records.single.generateTextMessage();
+      expect(body, contains('POST /login'));
+      expect(body, isNot(contains('authorization')));
+      expect(body, isNot(contains('699887766')));
     });
 
     test('a throwing redactor drops the record and does not throw', () {
@@ -433,4 +514,17 @@ class _ThrowingObserver extends TalkerObserver {
   @override
   void onException(TalkerException err) =>
       throw StateError('OTel.initialize() first');
+}
+
+/// A record kind that renders content that is in no field of `TalkerData`,
+/// the way an HTTP logger renders a request's headers and a response's body.
+class _WideLog extends TalkerLog {
+  _WideLog(super.message, this.extra) : super(logLevel: LogLevel.warning);
+
+  final String extra;
+
+  @override
+  String generateTextMessage({
+    TimeFormat timeFormat = TimeFormat.timeAndSeconds,
+  }) => '${super.generateTextMessage(timeFormat: timeFormat)}\n$extra';
 }
