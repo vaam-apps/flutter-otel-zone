@@ -14,6 +14,7 @@ import 'package:talker/talker.dart';
 import 'bridge.dart';
 import 'config.dart';
 import 'native-crash.dart';
+import 'otlp-exporter.dart';
 import 'spool.dart';
 
 /// One `Talker`, one OpenTelemetry SDK, and one guarded zone that funnels
@@ -107,6 +108,11 @@ class OtelZone {
   /// Brings up the OpenTelemetry SDK and points it at
   /// [OtelZoneConfig.endpoint].
   ///
+  /// Nothing in here waits on the collector: this is awaited before `runApp`,
+  /// so a native crash recovered from the last run is written to the spool
+  /// and acknowledged, and its delivery, like the replay, carries on in the
+  /// background.
+  ///
   /// **Never throws.** A phone with no route to the collector — the normal
   /// case on a bad connection, and the case on every developer machine
   /// without a collector running — must not be a phone that cannot open the
@@ -141,6 +147,14 @@ class OtelZone {
     // silently changing the app's lifecycle wiring on a retry.
     _watchLifecycle();
     try {
+      // Resolved once, so the spool, its replay and the crash drain all send
+      // what dartastic's own exporter would have sent. Built by hand, an
+      // exporter sends no headers at all, and the crash path is the one that
+      // must not lose its credentials.
+      final Map<String, String> headers = resolveOtlpHeaders();
+      LogRecordExporter newExporter() =>
+          buildOtlpLogExporter(endpoint: config.endpoint, headers: headers);
+
       // Built before `initialize` so the pipeline is handed an exporter that
       // already knows where to spool. `null` leaves dartastic's own exporter
       // in place, which is what every build that does not opt in gets.
@@ -148,12 +162,12 @@ class OtelZone {
       SpoolingLogRecordExporter? spool;
       if (spoolDirectory != null) {
         spool = SpoolingLogRecordExporter(
-          delegate: OtlpHttpLogRecordExporter(
-            OtlpHttpLogRecordExporterConfig(endpoint: config.endpoint),
-          ),
+          delegate: newExporter(),
           directory: spoolDirectory(),
           maxBatches: config.spoolMaxBatches,
           maxAge: config.spoolMaxAge,
+          maxAttempts: config.spoolMaxAttempts,
+          onWarning: talker.warning,
         );
       }
       await OTel.initialize(
@@ -174,19 +188,16 @@ class OtelZone {
       // until initialize() has returned successfully.
       bridge.ready = true;
 
-      // Recovered before the summary, so the line can report it. An empty
-      // `pending()` is a local call, so this only reaches the network when
-      // the OS actually held a record from the last run.
+      // Recovered before the summary, so the line can report it. Only local
+      // work is awaited: reports are written to the spool and acknowledged,
+      // and delivery carries on after `start` has returned. Awaiting the
+      // network here would put a crash report on a bad connection in front
+      // of the app's first frame.
       int nativeCrashes = 0;
       if (config.enableLogs) {
-        final LogRecordExporter crashExporter =
-            spool ??
-            OtlpHttpLogRecordExporter(
-              OtlpHttpLogRecordExporterConfig(endpoint: config.endpoint),
-            );
         nativeCrashes = await NativeCrashDrain(
           source: _nativeCrashSource,
-          exporter: crashExporter,
+          exporter: spool ?? newExporter(),
           loggerName: config.loggerName,
           redact: config.redact,
           onWarning: talker.warning,
@@ -202,6 +213,8 @@ class OtelZone {
         // Replay reaches for the network, and `start` is awaited before
         // `runApp`, so it cannot be on that path. The summary does wait for
         // it: with spooling on, how much was replayed is the line's point.
+        // Files the crash drain just wrote are being delivered already, and
+        // the spool keeps replay from sending them a second time.
         unawaited(
           exporter
               .replay()
