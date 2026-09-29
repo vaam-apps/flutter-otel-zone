@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.0](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.3.1...v0.4.0) (2026-09-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* spans no longer carry `riverpod.provider.argument` unless `riverpodObserver(recordArguments: true)` is passed.
+
+### Features
+
+* spoolDirectory accepts a Future, so the README's path_provider example compiles ([#39](https://github.com/vaam-apps/flutter-otel-zone/issues/39)) ([cbb0662](https://github.com/vaam-apps/flutter-otel-zone/commit/cbb0662846a43405c853a7d98786d025019fbfc4)), closes [#38](https://github.com/vaam-apps/flutter-otel-zone/issues/38)
+
+
+### Bug Fixes
+
+* redact covers spans, and riverpodObserver() drops provider arguments by default ([#44](https://github.com/vaam-apps/flutter-otel-zone/issues/44)) ([97c7966](https://github.com/vaam-apps/flutter-otel-zone/commit/97c79664305f635949c54693ead17831451e5dc1))
+
+
+### Continuous Integration
+
+* scope the crash harness's log reads to a launch, not to a clear ([#43](https://github.com/vaam-apps/flutter-otel-zone/issues/43)) ([05c7d97](https://github.com/vaam-apps/flutter-otel-zone/commit/05c7d97a494526a67085f17c66d3544c2425824d))
+
 ## [0.3.1](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.3.0...v0.3.1) (2026-09-29)
 
 
