@@ -60,6 +60,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'log-window.dart';
 import 'otlp-log-sink.dart';
 
 const String _package = 'com.example.otel_zone_example';
@@ -407,20 +408,50 @@ class _Device {
     }
   }
 
-  /// Starts the activity, first clearing the log so that what is read back
+  String? _since;
+
+  /// Opens this launch's window on the device log: everything logged from now
+  /// on, and nothing before.
+  ///
+  /// The log is cleared first, but only as housekeeping, and it is allowed to
+  /// fail: on a freshly booted emulator `logcat -c` can refuse to clear a
+  /// buffer for a few seconds ("failed to clear the 'main' log"), and it is
+  /// retried for that. What guarantees that a read-back holds this launch's
+  /// lines and no other's is [_since], the device's own clock at this moment,
+  /// which every read passes to `logcat -T`. A clear that never succeeds
+  /// therefore costs a longer buffer to search and nothing else.
+  Future<void> markLog() async {
+    await succeedsWithin(
+      () => adbCommand(<String>['logcat', '-b', 'all', '-c']),
+      onFailure: (Object error, int attempt) => stdout.writeln(
+        '  logcat clear failed (attempt $attempt), '
+        '${error.toString().trim().replaceAll('\n', ' ')}',
+      ),
+    );
+    _since = logcatSince(await shell(<String>['date', '+%s.%N']));
+  }
+
+  /// `logcat`'s arguments for reading only what was logged since [markLog].
+  List<String> get _sinceMark {
+    final String? since = _since;
+    if (since == null) throw StateError('the log was read before markLog()');
+    return <String>['-T', since];
+  }
+
+  /// Starts the activity, first marking the log so that what is read back
   /// belongs to this launch.
   ///
   /// [relaunchAfter] makes the OS relaunch the activity that long after the
   /// start was requested.
   Future<void> start({Duration? relaunchAfter}) async {
-    await adbCommand(<String>['logcat', '-b', 'all', '-c']);
+    await markLog();
     if (relaunchAfter != null) {
       Timer(relaunchAfter, () => unawaited(updateAppInfo()));
     }
     await shell(<String>['am', 'start', '-W', '-n', _activity]);
   }
 
-  /// Every start-up line the app has logged since the log was last cleared,
+  /// Every start-up line the app has logged since the log was last marked,
   /// in order, each with the line it came from (which names the process).
   ///
   /// More than one when the activity was relaunched in the same process: each
@@ -429,6 +460,7 @@ class _Device {
     final String log = await adbCommand(<String>[
       'logcat',
       '-d',
+      ..._sinceMark,
       '-v',
       'threadtime',
       '-s',
@@ -457,11 +489,12 @@ class _Device {
       shell(<String>['dumpsys', 'activity', 'exit-info', _package]);
 
   /// How many times the main activity was created since the log was last
-  /// cleared. More than once means Android relaunched it, in the same process.
+  /// marked. More than once means Android relaunched it, in the same process.
   Future<int> activityCreations() async {
     final String log = await adbCommand(<String>[
       'logcat',
       '-d',
+      ..._sinceMark,
       '-b',
       'events',
       '-s',
@@ -972,7 +1005,7 @@ class _ReleaseRefusal {
 
     stdout.writeln('\n== runtime: a release build refuses every kind');
     await device.reinstall(_releaseApkPath);
-    await device.adbCommand(<String>['logcat', '-c']);
+    await device.markLog();
     await device.shell(<String>['am', 'start', '-W', '-n', _activity]);
     await Future<void>.delayed(const Duration(seconds: 8));
     final int? before = await device.pid();
@@ -1004,6 +1037,7 @@ class _ReleaseRefusal {
     final String log = await device.adbCommand(<String>[
       'logcat',
       '-d',
+      ...device._sinceMark,
       '-s',
       'OtelZoneCrashHarness:W',
       'AndroidRuntime:E',
