@@ -227,6 +227,9 @@ a crash report on a bad connection never delays the first frame.
   acknowledged only once the collector has accepted it; a phone that is offline
   re-reads it on the next launch. In that case the count in the start-up line
   is of reports handed off, not of reports the collector has taken.
+  Acknowledging on durability means the spool's limits then apply to the
+  report: a file dropped after `spoolMaxAttempts` failures, or evicted by
+  `spoolMaxBatches` or `spoolMaxAge`, takes its crash reports with it.
 - **Redacted like everything else.** `redact` is applied to the message, the
   stack trace and the attributes, because a native stack is the densest PII the
   package ever handles. A redactor that throws drops the report rather than

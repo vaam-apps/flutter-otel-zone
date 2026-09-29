@@ -107,12 +107,22 @@ class NativeCrashDrain {
   ///
   /// Only local work is awaited: reading the platform's reports, writing the
   /// spool file, and acknowledging. With a spool, the report is acknowledged
-  /// as soon as it is on disk and the spool delivers it in its own time. If
-  /// the spool cannot be written, or there is none, the export is started
-  /// without being awaited and the acknowledgement follows only if it
-  /// succeeds. In that case the count is of reports handed off, not of
-  /// reports the collector has taken, and a report whose export fails is
-  /// counted again on the launch that re-reads it.
+  /// as soon as it is on disk and the spool delivers it in its own time.
+  ///
+  /// That moves the point of no return: the platform's copy is released
+  /// before the collector has the report, so the spool's own limits apply to
+  /// it from then on. A file dropped after `spoolMaxAttempts` failed
+  /// deliveries, or evicted by `spoolMaxBatches` or `spoolMaxAge`, takes its
+  /// crash reports with it — with one warning for the first, none for the
+  /// second. This is the accepted trade for keeping the network off the boot
+  /// path, and it is the same one every other spooled batch already makes.
+  ///
+  /// Without a spool, or when it cannot be written, the export is started
+  /// without being awaited and the acknowledgement follows only if the
+  /// collector accepts it, so the platform's copy stays the durable one. In
+  /// that case the count is of reports handed off, not of reports the
+  /// collector has taken, and a report whose export fails is counted again on
+  /// the launch that re-reads it.
   ///
   /// Nothing here throws, and nothing here waits on the network.
   Future<int> drain() async {
