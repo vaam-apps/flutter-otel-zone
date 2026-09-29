@@ -192,7 +192,9 @@ jobs:
       - name: Crash harness is in Debug and absent from Release
         working-directory: example
         run: |
-          if ! grep -r -a -l -e otel_zone_example/crash -e OtelZoneHarnessException build/ios/iphonesimulator/Runner.app; then
+          # Swift-only marker: the channel name also appears in the Dart kernel
+          # blob a Debug build carries, which would make this pass regardless.
+          if ! grep -r -a -l -e OtelZoneHarnessException build/ios/iphonesimulator/Runner.app; then
             echo "the Debug build has no crash harness: DEBUG is not being defined" >&2
             exit 1
           fi
