@@ -288,13 +288,13 @@ tooling attached). And a launch request — an `otel_crash` intent extra on
 Android, an `-otel_crash` launch argument on iOS — lets a host script trigger a
 death from outside a process that is about to stop answering.
 
-| Platform | Kind | What happens |
-| --- | --- | --- |
-| Android | `jvm` | an uncaught exception on the main thread |
-| Android | `native` | `Process.sendSignal(myPid(), SIGSEGV)` (no JNI) |
-| Android | `anr` | the main thread is held for 60 s |
-| iOS | `nsexception` | an uncaught `NSException` |
-| iOS | `signal` | `raise(SIGABRT)` |
+| Platform | Kind          | What happens                                    |
+| -------- | ------------- | ----------------------------------------------- |
+| Android  | `jvm`         | an uncaught exception on the main thread        |
+| Android  | `native`      | `Process.sendSignal(myPid(), SIGSEGV)` (no JNI) |
+| Android  | `anr`         | the main thread is held for 60 s                |
+| iOS      | `nsexception` | an uncaught `NSException`                       |
+| iOS      | `signal`      | `raise(SIGABRT)`                                |
 
 **Debug only, and proved absent from release.** Android keeps the real
 `CrashHarness` in `src/debug` and a refusing stand-in in `src/release` and

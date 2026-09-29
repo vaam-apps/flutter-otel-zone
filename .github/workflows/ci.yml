@@ -192,13 +192,12 @@ jobs:
       - name: Crash harness is in Debug and absent from Release
         working-directory: example
         run: |
-          markers="-e otel_zone_example/crash -e OtelZoneHarnessException"
-          if ! grep -r -a -l $markers build/ios/iphonesimulator/Runner.app; then
+          if ! grep -r -a -l -e otel_zone_example/crash -e OtelZoneHarnessException build/ios/iphonesimulator/Runner.app; then
             echo "the Debug build has no crash harness: DEBUG is not being defined" >&2
             exit 1
           fi
           flutter build ios --release --no-codesign
-          if grep -r -a -l $markers build/ios/iphoneos/Runner.app/Runner; then
+          if grep -r -a -l -e otel_zone_example/crash -e OtelZoneHarnessException build/ios/iphoneos/Runner.app/Runner; then
             echo "the Release build contains the crash harness" >&2
             exit 1
           fi
