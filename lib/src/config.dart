@@ -1,3 +1,4 @@
+import 'dart:async' show FutureOr;
 import 'dart:io' show Directory;
 
 import 'package:flutter/foundation.dart' show kDebugMode;
@@ -186,8 +187,12 @@ final class OtelZoneConfig {
   ///
   /// A function rather than a [Directory] because the directory does not
   /// exist to be named until the platform channels do, which is after this
-  /// config is built.
-  final Directory Function()? spoolDirectory;
+  /// config is built. It may return the [Directory] or a `Future` of one, so
+  /// `path_provider`'s function is passed as it is and a plain
+  /// `() => directory` works too; [OtelZone.start] awaits it once, before the
+  /// SDK is brought up. A provider that throws, or whose future fails, leaves
+  /// telemetry off for the process, like any other failure of `start`.
+  final FutureOr<Directory> Function()? spoolDirectory;
 
   /// The most spool files kept before the oldest is evicted.
   ///

@@ -158,12 +158,13 @@ class OtelZone {
       // Built before `initialize` so the pipeline is handed an exporter that
       // already knows where to spool. `null` leaves dartastic's own exporter
       // in place, which is what every build that does not opt in gets.
-      final Directory Function()? spoolDirectory = config.spoolDirectory;
+      final FutureOr<Directory> Function()? spoolDirectory =
+          config.spoolDirectory;
       SpoolingLogRecordExporter? spool;
       if (spoolDirectory != null) {
         spool = SpoolingLogRecordExporter(
           delegate: newExporter(),
-          directory: spoolDirectory(),
+          directory: await spoolDirectory(),
           maxBatches: config.spoolMaxBatches,
           maxAge: config.spoolMaxAge,
           maxAttempts: config.spoolMaxAttempts,

@@ -168,14 +168,20 @@ final OtelZone observability = OtelZone(
   OtelZoneConfig(
     serviceName: 'my-app',
     endpoint: Env.otelEndpoint,
-    // `getApplicationSupportDirectory` from `path_provider`, read after the
-    // binding exists.
+    // `getApplicationSupportDirectory` from `path_provider`, which returns a
+    // `Future<Directory>`. `start()` awaits it once, so it is read after the
+    // binding exists. A plain `() => directory` works too.
     spoolDirectory: getApplicationSupportDirectory,
   ),
 );
 
 await observability.start(serviceVersion: '1.2.3');
 ```
+
+`spoolDirectory` is a `FutureOr<Directory> Function()`: a provider that throws,
+or whose future fails, leaves telemetry off for the process, as any other
+failure of `start()` does. The snippet above is compiled by
+`test/spool-directory-async_test.dart`.
 
 - **Write-ahead.** A batch is written to a temp file and renamed *before* the
   network is tried, and deleted once the collector has taken it. A process
