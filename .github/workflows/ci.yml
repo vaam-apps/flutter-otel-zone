@@ -182,3 +182,24 @@ jobs:
       - name: Build the example for the simulator
         working-directory: example
         run: flutter build ios --simulator --no-codesign
+
+      # The example's crash harness must exist in a Debug build and not in a
+      # Release one. It is guarded by `#if DEBUG`, and Flutter's Xcode template
+      # does not define DEBUG for the Runner target — example/ios/Flutter/
+      # Debug.xcconfig does. So this has to check both directions: a guard that
+      # is false everywhere would pass the "absent from release" half by
+      # accident, which is exactly how it went wrong the first time.
+      - name: Crash harness is in Debug and absent from Release
+        working-directory: example
+        run: |
+          # Swift-only marker: the channel name also appears in the Dart kernel
+          # blob a Debug build carries, which would make this pass regardless.
+          if ! grep -r -a -l -e OtelZoneHarnessException build/ios/iphonesimulator/Runner.app; then
+            echo "the Debug build has no crash harness: DEBUG is not being defined" >&2
+            exit 1
+          fi
+          flutter build ios --release --no-codesign
+          if grep -r -a -l -e otel_zone_example/crash -e OtelZoneHarnessException build/ios/iphoneos/Runner.app/Runner; then
+            echo "the Release build contains the crash harness" >&2
+            exit 1
+          fi

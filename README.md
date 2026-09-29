@@ -304,6 +304,98 @@ The Flutter-free half of the iOS code is unit-tested with `swift test` from
 documented JSON. On both platforms `NativeCrashSource` is the seam the drain is
 tested through.
 
+### Crash harness
+
+Native capture is the OS's behaviour, not ours, so it is proven by dying on
+purpose. `example/` carries a **debug-only** way to do that, and host scripts
+that crash it, relaunch it and read what the drain sent.
+
+The harness has two doors that end in the same code. A method channel,
+`otel_zone_example/crash`, takes `crash(kind)` and backs a small "Crash harness"
+panel in the debug UI (there so a person can verify on a real device with no
+tooling attached). And a launch request — an `otel_crash` intent extra on
+Android, an `-otel_crash` launch argument on iOS — lets a host script trigger a
+death from outside a process that is about to stop answering.
+
+| Platform | Kind          | What happens                                    |
+| -------- | ------------- | ----------------------------------------------- |
+| Android  | `jvm`         | an uncaught exception on the main thread        |
+| Android  | `native`      | `Process.sendSignal(myPid(), SIGSEGV)` (no JNI) |
+| Android  | `anr`         | the main thread is held for 60 s                |
+| iOS      | `nsexception` | an uncaught `NSException`                       |
+| iOS      | `signal`      | `raise(SIGABRT)`                                |
+
+**Debug only, and proved absent from release.** Android keeps the real
+`CrashHarness` in `src/debug` and a refusing stand-in in `src/release` and
+`src/profile`, so `MainActivity` is identical in every build type and a release
+APK contains neither the channel name nor the crash code. iOS wraps it in
+`#if DEBUG`; Flutter's Xcode template does not define `DEBUG` for the Runner
+target, so `example/ios/Flutter/Debug.xcconfig` does. The Dart side returns
+`false` without touching the channel outside `kDebugMode`. (Dart's AOT snapshot
+still carries the channel-name string; with no native handler it is inert.)
+`--release-refusal` (Android) and the `ios` job (iOS) check this rather than
+assume it.
+
+#### Android: host-driven, on an emulator
+
+`integration_test` cannot survive its own process dying, so the driver is on the
+host. For each kind, from a fresh install, `tool/android-crash-harness.dart`:
+launches the app and waits for `start()` to finish; asks for the crash with
+`adb shell am start --es otel_crash <kind>`; waits for the process to be gone;
+relaunches and requires **exactly one** FATAL record of that kind to have
+reached its own OTLP receiver (and the app's start-up line to say it recovered
+one); then relaunches again and requires none. It reads the wire, not a marker
+the app prints about itself.
+
+```bash
+cd example && flutter pub get && flutter create --platforms=android . && cd ..
+dart run tool/android-crash-harness.dart --device emulator-5554
+dart run tool/android-crash-harness.dart --device emulator-5554 --release-refusal
+cd example && flutter test integration_test -d emulator-5554   # channel is present, refuses an unknown kind
+```
+
+`--kinds jvm,native` narrows it; `--retries` (default 1) re-runs a failed kind
+from a fresh install. The receiver (`tool/otlp-log-sink.dart`) decodes OTLP by
+hand and is unit-tested against the SDK's own encoder.
+
+**The ANR needs two things a bare block does not give.** An ANR is declared
+only when something is *waiting* on the blocked main thread, so the script sends
+a tap 1.5 s after asking for the block; the OS declares the ANR 5 s after the
+tap (about 7 s in all). And the OS shows an "isn't responding" dialog and keeps
+the process alive until someone taps "Close app", so for the `anr` kind the
+script sets `hide_error_dialogs`, which makes the OS kill the process itself
+(recorded as `REASON_ANR`), and restores the previous value afterwards.
+
+`.github/workflows/crash-harness.yml` runs all of it on API 30 and API 34
+emulators on every pull request, push to `main`, nightly, and on demand.
+
+#### iOS: what a simulator can and cannot show
+
+MetricKit is not delivered on a simulator, so the signal and hang paths cannot
+be triggered there. The uncaught-`NSException` path can: the plugin's handler
+writes its JSON at the moment of the throw, so raise, relaunch, drain works
+without MetricKit.
+
+```bash
+cd example && flutter pub get && flutter create --platforms=ios . && cd ..
+dart run tool/ios-crash-harness.dart --device <booted simulator udid>
+```
+
+**Manual device verification** (not run in CI; a real-device farm is out of
+scope):
+
+1. Run the example from Xcode on a physical device, Debug configuration.
+2. `nsexception`: tap "Crash: nsexception", relaunch the app. The start-up line
+   says `recovered 1 native crash` and the collector shows a FATAL
+   `device.crash` with `device.crash.kind = nsexception`, the exception's reason
+   and its throw-site stack.
+3. MetricKit: with the app running, choose Xcode's **Debug > Simulate MetricKit
+   Payloads**. The subscriber writes the payload on arrival; stop and relaunch,
+   and the drain reports the sample crash and hang diagnostics
+   (`signal`/`nsexception` and `hang`), once each; a further launch reports none.
+4. A real signal: tap "Crash: signal", relaunch, and wait. iOS delivers the real
+   diagnostic up to a day later, on a later launch.
+
 The channel is generated, not written by hand:
 
 ```bash

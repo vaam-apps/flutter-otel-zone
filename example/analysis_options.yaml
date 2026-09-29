@@ -2,3 +2,9 @@ analyzer:
   exclude:
     - build/**
 include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    # The repository's own convention is kebab-case files, as in the package's
+    # analysis_options.yaml, which turns this off for the same reason.
+    file_names: false
