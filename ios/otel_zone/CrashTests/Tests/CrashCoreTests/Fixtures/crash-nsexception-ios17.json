@@ -1,0 +1,45 @@
+{
+  "version": "1.0.0",
+  "timeStampBegin": "2026-09-28 09:00:00",
+  "timeStampEnd": "2026-09-28 11:00:00",
+  "crashDiagnostics": [
+    {
+      "version": "1.0.0",
+      "callStackTree": {
+        "callStackPerThread": true,
+        "callStacks": [
+          {
+            "threadAttributed": true,
+            "callStackRootFrames": [
+              {
+                "binaryUUID": "77A62F2E-8212-30F3-84C1-E8497440ACF8",
+                "offsetIntoBinaryTextSegment": 6948,
+                "sampleCount": 1,
+                "binaryName": "libdyld.dylib",
+                "address": 7170808612
+              }
+            ]
+          }
+        ]
+      },
+      "diagnosticMetaData": {
+        "appBuildVersion": "42",
+        "appVersion": "1.4.0",
+        "deviceType": "iPhone16,1",
+        "exceptionCode": 0,
+        "exceptionType": 10,
+        "osVersion": "iPhone OS 17.5 (21F79)",
+        "platformArchitecture": "arm64e",
+        "signal": 6,
+        "terminationReason": "Namespace SIGNAL, Code 0x6",
+        "objectiveCexceptionReason": {
+          "composedMessage": "*** -[__NSArrayM objectAtIndex:]: index 3 beyond bounds [0 .. 1]",
+          "message": "*** -[__NSArrayM objectAtIndex:]: index %lu beyond bounds [0 .. %lu]",
+          "exceptionName": "NSRangeException",
+          "className": "NSException",
+          "arguments": ["3", "1"]
+        }
+      }
+    }
+  ]
+}

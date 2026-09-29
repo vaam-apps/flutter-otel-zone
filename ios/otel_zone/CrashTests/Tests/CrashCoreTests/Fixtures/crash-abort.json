@@ -1,0 +1,47 @@
+{
+  "version": "1.0.0",
+  "timeStampBegin": "2026-09-28 09:00:00",
+  "timeStampEnd": "2026-09-28 11:00:00",
+  "crashDiagnostics": [
+    {
+      "version": "1.0.0",
+      "callStackTree": {
+        "callStackPerThread": true,
+        "callStacks": [
+          {
+            "threadAttributed": true,
+            "callStackRootFrames": [
+              {
+                "binaryUUID": "77A62F2E-8212-30F3-84C1-E8497440ACF8",
+                "offsetIntoBinaryTextSegment": 6948,
+                "sampleCount": 1,
+                "binaryName": "libdyld.dylib",
+                "address": 7170808612,
+                "subFrames": [
+                  {
+                    "binaryUUID": "9F3A0C11-5D2E-3B7C-8E4F-1A6B7C8D9E0F",
+                    "offsetIntoBinaryTextSegment": 1048,
+                    "sampleCount": 1,
+                    "binaryName": "libsystem_c.dylib",
+                    "address": 7170900000
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "diagnosticMetaData": {
+        "appBuildVersion": "42",
+        "appVersion": "1.4.0",
+        "deviceType": "iPhone15,2",
+        "exceptionCode": 0,
+        "exceptionType": 10,
+        "osVersion": "iPhone OS 16.4 (20E247)",
+        "platformArchitecture": "arm64e",
+        "signal": 6,
+        "terminationReason": "Namespace SIGNAL, Code 0x6"
+      }
+    }
+  ]
+}

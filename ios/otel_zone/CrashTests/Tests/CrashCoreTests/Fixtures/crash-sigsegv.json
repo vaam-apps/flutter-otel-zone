@@ -1,0 +1,81 @@
+{
+  "version": "1.0.0",
+  "timeStampBegin": "2026-09-28 08:00:00",
+  "timeStampEnd": "2026-09-28 10:30:00",
+  "crashDiagnostics": [
+    {
+      "version": "1.0.0",
+      "callStackTree": {
+        "callStackPerThread": true,
+        "callStacks": [
+          {
+            "threadAttributed": false,
+            "callStackRootFrames": [
+              {
+                "binaryUUID": "77A62F2E-8212-30F3-84C1-E8497440ACF8",
+                "offsetIntoBinaryTextSegment": 6948,
+                "sampleCount": 1,
+                "binaryName": "libdyld.dylib",
+                "address": 7170808612,
+                "subFrames": [
+                  {
+                    "binaryUUID": "4C1E5B5D-0E4A-3F0B-9A55-2D1B5E7A8C10",
+                    "offsetIntoBinaryTextSegment": 21984,
+                    "sampleCount": 1,
+                    "binaryName": "libsystem_kernel.dylib",
+                    "address": 7170819000
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "threadAttributed": true,
+            "callStackRootFrames": [
+              {
+                "binaryUUID": "77A62F2E-8212-30F3-84C1-E8497440ACF8",
+                "offsetIntoBinaryTextSegment": 6948,
+                "sampleCount": 1,
+                "binaryName": "libdyld.dylib",
+                "address": 7170808612,
+                "subFrames": [
+                  {
+                    "binaryUUID": "70B89F27-1634-3580-A695-57CDB41D7743",
+                    "offsetIntoBinaryTextSegment": 165304,
+                    "sampleCount": 1,
+                    "binaryName": "Runner",
+                    "address": 4300000000,
+                    "subFrames": [
+                      {
+                        "binaryUUID": "70B89F27-1634-3580-A695-57CDB41D7743",
+                        "offsetIntoBinaryTextSegment": 165560,
+                        "sampleCount": 1,
+                        "binaryName": "Runner",
+                        "address": 4300000256
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "diagnosticMetaData": {
+        "appBuildVersion": "42",
+        "appVersion": "1.4.0",
+        "bundleIdentifier": "com.example.app",
+        "deviceType": "iPhone15,2",
+        "exceptionCode": 1,
+        "exceptionType": 1,
+        "osVersion": "iPhone OS 16.4 (20E247)",
+        "pid": 811,
+        "platformArchitecture": "arm64e",
+        "regionFormat": "US",
+        "signal": 11,
+        "terminationReason": "Namespace SIGNAL, Code 0xb",
+        "virtualMemoryRegionInfo": "0 is not in any region."
+      }
+    }
+  ]
+}
