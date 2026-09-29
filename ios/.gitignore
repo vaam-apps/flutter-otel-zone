@@ -36,3 +36,7 @@ Icon?
 /Flutter/Generated.xcconfig
 /Flutter/ephemeral/
 /Flutter/flutter_export_environment.sh
+
+# SwiftPM (ios/otel_zone/CrashTests)
+.build/
+.swiftpm/

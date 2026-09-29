@@ -237,8 +237,36 @@ On Android both sources are live, and they are joined so a crash is one record:
   for the same crash (same pid, timestamps within 30 s) are merged: the JVM
   report's stack trace, the OS record's id and session.
 
-The iOS side is still a no-op and lands in its own ticket. That is what lets the
-contract be tested today — `NativeCrashSource` is the seam.
+On iOS two sources feed `pending()`, both started in `register(with:)`, both
+stored under `Application Support/otel_zone/` (excluded from backup), and
+neither a signal handler:
+
+- **MetricKit** (iOS 14+). An `MXMetricManagerSubscriber` writes each
+  `MXDiagnosticPayload`'s JSON to `diagnostics/` the moment it arrives, because
+  it can arrive before Dart is running and is never delivered twice. `pending()`
+  maps its crash diagnostics to `signal` (or `nsexception`, when iOS 17 names
+  the exception) reports and its hang diagnostics to `hang` reports, each with
+  the crashing thread's frames as binary UUID plus offset. Nothing is
+  symbolicated on the device.
+- **Uncaught `NSException`** (all supported iOS). A chained
+  `NSSetUncaughtExceptionHandler` writes the name, reason and
+  `callStackSymbols` to `exceptions/` and then calls the handler that was
+  installed before it, so a crash looks exactly as it did without this package.
+  It exists because MetricKit only carries the reason from iOS 17.
+
+One crash can be in both, so `pending()` merges them: an exception report whose
+time falls inside a MetricKit payload's window (plus a minute of slack), and
+whose diagnostic is `SIGABRT` or already names an exception, becomes **one**
+`nsexception` record with the exception's reason and throw-site stack and
+MetricKit's crashing thread attached. When only one side has arrived — MetricKit
+is not delivered on a simulator or a debug build — that side is returned alone.
+The merge rule is documented on `NativeCrashRepository` and tested there.
+
+The Flutter-free half of the iOS code is unit-tested with `swift test` from
+`ios/otel_zone/CrashTests`, against fixture payloads shaped like Apple's
+documented JSON.
+
+That is what lets the contract be tested today — `NativeCrashSource` is the seam.
 
 The channel is generated, not written by hand:
 

@@ -15,6 +15,8 @@ A new Flutter plugin project.
   s.source           = { :path => '.' }
   s.source_files = 'otel_zone/Sources/otel_zone/**/*'
   s.dependency 'Flutter'
+  # MetricKit is where iOS records crashes and hangs; it is a system framework.
+  s.frameworks = 'MetricKit'
   s.platform = :ios, '13.0'
 
   # Flutter.framework does not contain a i386 slice.

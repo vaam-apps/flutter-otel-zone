@@ -1,0 +1,21 @@
+{
+  "version": "1.0.0",
+  "timeStampBegin": "2026-09-28 06:00:00",
+  "timeStampEnd": "2026-09-28 07:00:00",
+  "crashDiagnostics": [
+    {
+      "callStackTree": { "callStackPerThread": true, "callStacks": [] },
+      "diagnosticMetaData": { "signal": 11, "exceptionType": 1 }
+    },
+    {
+      "callStackTree": { "callStackPerThread": true, "callStacks": [] },
+      "diagnosticMetaData": { "signal": 4, "exceptionType": 2 }
+    }
+  ],
+  "hangDiagnostics": [
+    {
+      "callStackTree": { "callStackPerThread": false, "callStacks": [] },
+      "diagnosticMetaData": { "hangDuration": "3 sec 0 ms" }
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "version": "9.9.9",
+  "someFutureTopLevelKey": { "a": [1, 2, 3] },
+  "crashDiagnostics": [
+    null,
+    {
+      "futureField": true,
+      "callStackTree": {
+        "callStacks": [
+          {
+            "threadAttributed": true,
+            "callStackRootFrames": [
+              { "binaryName": 12, "address": "not a number", "subFrames": "nope" },
+              "not a frame"
+            ]
+          },
+          "not a stack"
+        ]
+      },
+      "diagnosticMetaData": {
+        "exceptionType": "1",
+        "signal": "not a number",
+        "newScalar": 7,
+        "newFlag": false,
+        "newObject": { "nested": "ignored" },
+        "newList": ["ignored"]
+      }
+    },
+    {}
+  ]
+}

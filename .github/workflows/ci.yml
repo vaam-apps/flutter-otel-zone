@@ -14,10 +14,10 @@
 #   * `dart format --set-exit-if-changed`, because a formatter that only runs
 #     on someone's laptop formats differently on the next one.
 #
-# A second job, `android`, covers the Kotlin, which none of the above touches.
-# The org-wide `lint.yml` checks .kt style and never compiles it, so before
-# this job a Kotlin file that did not build passed every gate in this
-# repository. That is not hypothetical: the first run of
+# A second job, `android`, covers the Kotlin, and a third, `ios`, the Swift;
+# none of the above touches either. The org-wide `lint.yml` checks .kt style
+# and never compiles it, so before this job a Kotlin file that did not build
+# passed every gate in this repository. That is not hypothetical: the first run of
 # `:otel_zone:testDebugUnitTest` failed outright, and then failed 7/11 on a
 # path bug that would have stopped every crash report from ever being written.
 name: ci
@@ -132,3 +132,53 @@ jobs:
       - name: Kotlin unit tests
         working-directory: example/android
         run: ./gradlew :otel_zone:testDebugUnitTest --console=plain
+
+  # The Swift counterpart of the Kotlin job above, and for the same reason:
+  # the org-wide lint never compiles a .swift file, so before this job one that
+  # did not build passed every gate here. Two things run, because two things
+  # can break separately:
+  #
+  #   * `swift test` on the Foundation-only half (ios/otel_zone/Sources/
+  #     otel_zone/Crash), which is where the MetricKit mapper, the merge rule
+  #     and the stores live. Needs only Xcode, not Flutter.
+  #   * A simulator build of the example, which compiles the half that links
+  #     Flutter and MetricKit — the plugin, the Pigeon glue, the subscriber.
+  #     The runner is generated, not committed, for the same reason the Gradle
+  #     wrapper is not.
+  ios:
+    name: swift unit tests and ios build
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: main
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Swift unit tests
+        working-directory: ios/otel_zone/CrashTests
+        run: swift test
+
+      - name: Resolve
+        run: flutter pub get
+
+      - name: Resolve the example
+        working-directory: example
+        run: flutter pub get
+
+      - name: Generate the example's iOS runner
+        working-directory: example
+        run: flutter create --platforms=ios .
+
+      # Compiles every .swift file in the plugin against the real Flutter and
+      # MetricKit, which nothing else in this repository does.
+      - name: Build the example for the simulator
+        working-directory: example
+        run: flutter build ios --simulator --no-codesign
