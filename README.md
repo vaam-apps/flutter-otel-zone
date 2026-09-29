@@ -260,13 +260,20 @@ whose diagnostic is `SIGABRT` or already names an exception, becomes **one**
 `nsexception` record with the exception's reason and throw-site stack and
 MetricKit's crashing thread attached. When only one side has arrived — MetricKit
 is not delivered on a simulator or a debug build — that side is returned alone.
-The merge rule is documented on `NativeCrashRepository` and tested there.
+The exception report always exists first, so it is usually exported before
+MetricKit's diagnostic of the same crash turns up. Acknowledging an exception
+report on its own therefore leaves a small entry (id, name, time; 32 at most,
+forgotten after a week) in `acknowledged-exceptions.json`, and a MetricKit
+crash that matches one by the same rule is still returned — its frames carry
+the symbolicatable binary UUIDs — but tagged `otel_zone.duplicate_of` (the
+exception report's id) and `otel_zone.late_metrickit`, so a backend can
+collapse the pair. The merge rule is documented on `NativeCrashRepository` and
+tested there.
 
 The Flutter-free half of the iOS code is unit-tested with `swift test` from
 `ios/otel_zone/CrashTests`, against fixture payloads shaped like Apple's
-documented JSON.
-
-That is what lets the contract be tested today — `NativeCrashSource` is the seam.
+documented JSON. On both platforms `NativeCrashSource` is the seam the drain is
+tested through.
 
 The channel is generated, not written by hand:
 

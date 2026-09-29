@@ -107,7 +107,8 @@ final class NSExceptionSourceTests: XCTestCase {
     try fire(NSException(name: .rangeException, reason: "x", userInfo: nil))
     let repository = NativeCrashRepository(
       metricKit: CrashFileStore(directory: directory.appendingPathComponent("mx"), prefix: "mx"),
-      exceptions: store)
+      exceptions: store,
+      ledger: AcknowledgedExceptionLedger(file: directory.appendingPathComponent("ledger.json")))
 
     let reports = repository.pending()
 

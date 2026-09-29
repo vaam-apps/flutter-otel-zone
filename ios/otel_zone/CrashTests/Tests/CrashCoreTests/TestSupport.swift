@@ -38,6 +38,8 @@ struct Harness {
   let clock: TestClock
   let metricKit: CrashFileStore
   let exceptions: CrashFileStore
+  let ledger: AcknowledgedExceptionLedger
+  let ledgerFile: URL
   let repository: NativeCrashRepository
 
   init(maxFiles: Int = 16, clock: TestClock = TestClock()) {
@@ -51,7 +53,10 @@ struct Harness {
       maxFiles: maxFiles, staleTempInterval: 60, now: { clock.now })
     try! metricKit.prepareDirectory()
     try! exceptions.prepareDirectory()
-    repository = NativeCrashRepository(metricKit: metricKit, exceptions: exceptions)
+    ledgerFile = root.appendingPathComponent("acknowledged-exceptions.json")
+    ledger = AcknowledgedExceptionLedger(file: ledgerFile, now: { clock.now })
+    repository = NativeCrashRepository(
+      metricKit: metricKit, exceptions: exceptions, ledger: ledger)
   }
 
   func cleanUp() { try? FileManager.default.removeItem(at: root) }

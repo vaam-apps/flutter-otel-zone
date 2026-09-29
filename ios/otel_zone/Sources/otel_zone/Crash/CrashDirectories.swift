@@ -11,6 +11,8 @@ import Foundation
 struct CrashDirectories {
   let metricKit: URL
   let exceptions: URL
+  /// The acknowledged-exceptions ledger, beside the two stores.
+  let ledger: URL
 
   /// `nil` when the system will not name an Application Support directory.
   /// Capture is then off, not an error: no reports, exactly as before.
@@ -26,6 +28,7 @@ struct CrashDirectories {
   init(root: URL) {
     metricKit = root.appendingPathComponent("diagnostics", isDirectory: true)
     exceptions = root.appendingPathComponent("exceptions", isDirectory: true)
+    ledger = root.appendingPathComponent("acknowledged-exceptions.json")
     self.root = root
   }
 

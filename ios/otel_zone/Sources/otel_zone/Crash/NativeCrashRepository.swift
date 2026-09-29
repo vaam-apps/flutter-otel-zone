@@ -30,10 +30,23 @@ import Foundation
 /// the first entry of `threads`.
 ///
 /// When only one side has arrived — MetricKit is not delivered on a simulator
-/// or a dev build, and can lag on iOS 14 — that side is returned alone. A
-/// later MetricKit delivery of a crash already returned this way is exported
-/// again; a lost crash is worse than a duplicate, and this package cannot
-/// know that a diagnostic is coming.
+/// or a dev build, and can lag on iOS 14 — that side is returned alone.
+///
+/// ## The late diagnostic
+///
+/// The exception report is written at crash time, so it is always the first
+/// to exist, and it is usually exported and acknowledged alone before MetricKit
+/// delivers the diagnostic of the same crash. Acknowledging a report that was
+/// *not* merged therefore records it (id, name, timestamp) in an
+/// [AcknowledgedExceptionLedger]. A crash diagnostic that no live exception
+/// report claimed is then matched against the ledger by the same rule, and on
+/// a match it is **still returned**, tagged `otel_zone.duplicate_of` (the
+/// exception report's id) and `otel_zone.late_metrickit` (`true`).
+///
+/// Tagged rather than dropped because the diagnostic's frames are the ones with
+/// binary UUIDs and offsets — the symbolicatable ones — and a backend can
+/// collapse a tagged record, where a dropped one is simply gone. Acknowledging
+/// the tagged report forgets the ledger entry it explained.
 final class NativeCrashRepository {
   /// How far outside a payload's window an exception may fall and still be
   /// matched, for clocks that disagree by a little.
@@ -46,11 +59,15 @@ final class NativeCrashRepository {
 
   private let metricKit: CrashFileStore
   private let exceptions: CrashFileStore
+  private let ledger: AcknowledgedExceptionLedger
   private let lock = NSLock()
 
-  init(metricKit: CrashFileStore, exceptions: CrashFileStore) {
+  init(
+    metricKit: CrashFileStore, exceptions: CrashFileStore, ledger: AcknowledgedExceptionLedger
+  ) {
     self.metricKit = metricKit
     self.exceptions = exceptions
+    self.ledger = ledger
   }
 
   /// Persists a payload's JSON as delivered, before anything reads it.
@@ -108,7 +125,9 @@ final class NativeCrashRepository {
       exceptions.read(id: id).flatMap { NSExceptionReport.decode(id: id, data: $0) }
     }.sorted { ($0.timestampMicros, $0.id) < ($1.timestampMicros, $1.id) }
 
-    let merged = Self.merge(diagnostics: diagnostics, exceptions: reports)
+    let merged = Self.merge(
+      diagnostics: diagnostics, exceptions: reports,
+      acknowledged: ledger.entries().map(\.asReport))
     return merged.sorted { ($0.timestampMicros, $0.id) < ($1.timestampMicros, $1.id) }
   }
 
@@ -119,15 +138,44 @@ final class NativeCrashRepository {
     for id in ids {
       // The ids come from across the channel, so each is checked before it
       // is turned into a path.
-      for part in id.split(separator: Self.mergedSeparator, omittingEmptySubsequences: false) {
-        let part = String(part)
+      let parts = id.split(separator: Self.mergedSeparator, omittingEmptySubsequences: false)
+        .map(String.init)
+      // A merged id names two files that are one crash; only a report that
+      // went out on its own can be followed by a late diagnostic.
+      let standalone = parts.count == 1
+      for part in parts {
         guard CrashFileStore.isSafeId(part) else { continue }
         if part.hasPrefix(Self.exceptionPrefix + "-") {
+          if standalone { remember(exceptionId: part) }
           exceptions.delete(id: part)
         } else if part.hasPrefix(Self.metricKitPrefix + "-") {
+          if standalone { forgetLedgerEntry(explainedBy: part) }
           retire(reportId: part)
         }
       }
+    }
+  }
+
+  /// Records an exception report that is about to be deleted unmerged.
+  private func remember(exceptionId id: String) {
+    guard let data = exceptions.read(id: id),
+      let report = NSExceptionReport.decode(id: id, data: data)
+    else { return }
+    ledger.record(id: id, name: report.name, timestampMicros: report.timestampMicros)
+  }
+
+  /// Forgets the ledger entry a delivered late diagnostic was tagged with.
+  private func forgetLedgerEntry(explainedBy reportId: String) {
+    guard let (fileId, _, _) = Self.parse(reportId: reportId),
+      let data = metricKit.read(id: fileId)
+    else { return }
+    let diagnostics = MetricKitPayloadMapper.map(
+      data: data, fileId: fileId, receivedAt: CrashFileStore.timestamp(ofId: fileId) ?? Date())
+    guard let index = diagnostics.firstIndex(where: { $0.record.id == reportId }) else { return }
+    let entries = ledger.entries().map(\.asReport)
+    let claimed = Self.match(entries, to: diagnostics, consumed: [])
+    if let entry = claimed.first(where: { $0.diagnostic == index }) {
+      ledger.remove(id: entry.report.id)
     }
   }
 
@@ -135,15 +183,61 @@ final class NativeCrashRepository {
 
   /// The merge rule, on already-read inputs so a test can drive it directly.
   static func merge(
-    diagnostics: [MappedDiagnostic], exceptions: [NSExceptionReport]
+    diagnostics: [MappedDiagnostic], exceptions: [NSExceptionReport],
+    acknowledged: [NSExceptionReport] = []
   ) -> [CrashRecord] {
     var consumed = Set<Int>()
     var output: [CrashRecord] = []
 
+    let merged = match(exceptions, to: diagnostics, consumed: consumed)
     for report in exceptions {
+      if let pair = merged.first(where: { $0.report.id == report.id }) {
+        consumed.insert(pair.diagnostic)
+        output.append(combine(diagnostics[pair.diagnostic], report))
+      } else {
+        output.append(report.record)
+      }
+    }
+
+    // Diagnostics no live report claimed may still be the late arrival of a
+    // crash that was delivered on its own. Matched second, so a live report
+    // always wins a diagnostic over a remembered one.
+    var duplicateOf: [Int: String] = [:]
+    for pair in match(acknowledged, to: diagnostics, consumed: consumed) {
+      consumed.insert(pair.diagnostic)
+      duplicateOf[pair.diagnostic] = pair.report.id
+    }
+    for (index, diagnostic) in diagnostics.enumerated() {
+      if merged.contains(where: { $0.diagnostic == index }) { continue }
+      var record = diagnostic.record
+      if let original = duplicateOf[index] {
+        var attributes = record.attributes ?? [:]
+        attributes[duplicateOfAttribute] = original
+        attributes[lateMetricKitAttribute] = "true"
+        record.attributes = attributes
+      }
+      output.append(record)
+    }
+    return output
+  }
+
+  /// Attributes on a MetricKit report whose crash was already delivered from
+  /// its `NSException` report, so a backend can collapse the two.
+  static let duplicateOfAttribute = "otel_zone.duplicate_of"
+  static let lateMetricKitAttribute = "otel_zone.late_metrickit"
+
+  /// One-to-one pairs of a report with the crash diagnostic that describes it,
+  /// oldest report first, skipping diagnostics already in [consumed].
+  static func match(
+    _ reports: [NSExceptionReport], to diagnostics: [MappedDiagnostic], consumed: Set<Int>
+  ) -> [(report: NSExceptionReport, diagnostic: Int)] {
+    var taken = consumed
+    var pairs: [(report: NSExceptionReport, diagnostic: Int)] = []
+    for report in reports.sorted(by: { ($0.timestampMicros, $0.id) < ($1.timestampMicros, $1.id) })
+    {
       let at = Date(timeIntervalSince1970: TimeInterval(report.timestampMicros) / 1_000_000)
       let candidates = diagnostics.enumerated().filter { index, diagnostic in
-        !consumed.contains(index) && diagnostic.isCrash
+        !taken.contains(index) && diagnostic.isCrash
           && diagnostic.couldBeUncaughtException
           && at >= diagnostic.windowStart.addingTimeInterval(-mergeSlack)
           && at <= diagnostic.windowEnd.addingTimeInterval(mergeSlack)
@@ -158,16 +252,11 @@ final class NativeCrashRepository {
         return ld == rd ? lhs.offset < rhs.offset : ld < rd
       }
       if let best {
-        consumed.insert(best.offset)
-        output.append(combine(best.element, report))
-      } else {
-        output.append(report.record)
+        taken.insert(best.offset)
+        pairs.append((report, best.offset))
       }
     }
-    for (index, diagnostic) in diagnostics.enumerated() where !consumed.contains(index) {
-      output.append(diagnostic.record)
-    }
-    return output
+    return pairs
   }
 
   private static func agrees(_ diagnostic: MappedDiagnostic, _ report: NSExceptionReport)
@@ -247,5 +336,15 @@ final class NativeCrashRepository {
     default: return nil
     }
     return (parts[0..<3].joined(separator: "-"), key, index)
+  }
+}
+
+extension AcknowledgedExceptionLedger.Entry {
+  /// A ledger entry as the report the match rule takes. It has no reason or
+  /// stack — the ledger keeps a name and a time — so only the time and the
+  /// name can count towards a match.
+  fileprivate var asReport: NSExceptionReport {
+    NSExceptionReport(
+      id: id, name: name, reason: nil, symbols: [], timestampMicros: timestampMicros)
   }
 }

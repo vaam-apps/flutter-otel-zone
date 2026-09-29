@@ -49,7 +49,9 @@ public class OtelZonePlugin: NSObject, FlutterPlugin {
       directory: directories.metricKit, prefix: NativeCrashRepository.metricKitPrefix)
     let exceptionStore = CrashFileStore(
       directory: directories.exceptions, prefix: NativeCrashRepository.exceptionPrefix)
-    let repository = NativeCrashRepository(metricKit: metricKitStore, exceptions: exceptionStore)
+    let repository = NativeCrashRepository(
+      metricKit: metricKitStore, exceptions: exceptionStore,
+      ledger: AcknowledgedExceptionLedger(file: directories.ledger))
 
     NSExceptionSource.install(store: exceptionStore)
 

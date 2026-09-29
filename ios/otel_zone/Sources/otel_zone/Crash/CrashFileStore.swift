@@ -157,11 +157,19 @@ final class CrashFileStore {
   }
 
   private func put(_ data: Data, id: String) throws {
-    let target = url(for: id)
-    let temp = directory.appendingPathComponent(id + Self.fileSuffix + Self.tempSuffix)
+    try Self.atomicWrite(data, to: url(for: id))
+  }
+
+  /// Temp file beside [target], then `rename(2)` over it.
+  ///
+  /// `rename` rather than `moveItem`: it replaces an existing target
+  /// atomically, which both `replace(id:with:)` and the ledger rely on. The
+  /// temp file is named from the target, so a write killed halfway leaves one
+  /// `*.tmp` to be swept, not a partly written target.
+  static func atomicWrite(_ data: Data, to target: URL) throws {
+    let temp = target.deletingLastPathComponent()
+      .appendingPathComponent(target.lastPathComponent + tempSuffix)
     try data.write(to: temp)
-    // `rename` rather than `moveItem`: it replaces an existing target
-    // atomically, which `replace(id:with:)` relies on.
     if rename(temp.path, target.path) != 0 {
       let code = errno
       try? FileManager.default.removeItem(at: temp)
