@@ -24,6 +24,8 @@ class CrashStoreTest {
             maxReports = maxReports,
             nowMillis = { millis++ },
             staleTempMillis = staleWindow,
+            pid = { PID },
+            sessionId = SESSION,
         )
 
     @AfterTest
@@ -42,6 +44,15 @@ class CrashStoreTest {
         assertTrue(report.stacktrace.orEmpty().contains("RuntimeException"))
         assertEquals(Thread.currentThread().name, report.attributes?.get("thread.name"))
         assertTrue(report.timestampMicros > 0)
+    }
+
+    @Test
+    fun `a report carries the process and the session it was written in`() {
+        store().record(Thread.currentThread(), RuntimeException("boom"))
+
+        val report = store().pending().single()
+        assertEquals(PID.toString(), report.attributes?.get("process.pid"))
+        assertEquals(SESSION, report.sessionId)
     }
 
     @Test
@@ -134,12 +145,17 @@ class CrashStoreTest {
     fun `a directory that cannot be written reports the failure to its caller`() {
         val blocker = File(directory.parentFile, "otel-zone-blocker-${System.nanoTime()}")
         blocker.writeText("not a directory")
-        val store = CrashStore(directory = blocker, nowMillis = { millis++ })
+        val store = CrashStore(directory = blocker, nowMillis = { millis++ }, pid = { PID })
 
         assertFailsWith<Exception> {
             store.record(Thread.currentThread(), RuntimeException("boom"))
         }
 
         blocker.delete()
+    }
+
+    private companion object {
+        const val PID = 4242
+        const val SESSION = "0b8f6f0e-9f6c-4e34-8f57-2d3f5c1a7e10"
     }
 }

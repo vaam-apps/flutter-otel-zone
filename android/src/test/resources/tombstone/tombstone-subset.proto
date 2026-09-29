@@ -1,0 +1,50 @@
+// The slice of AOSP's tombstone.proto that ExitInfoSource reads, plus a few
+// fields it must skip, with the field numbers copied from
+//   https://android.googlesource.com/platform/system/core/+/refs/heads/main/debuggerd/proto/tombstone.proto
+// It exists only to build native-crash.bin with protoc, so the fixture is
+// produced by an encoder that is not ours. The command that regenerates it is
+// in TombstoneDecoderTest's KDoc.
+syntax = "proto3";
+
+message Tombstone {
+  string build_fingerprint = 2;
+  uint32 pid = 5;
+  uint32 tid = 6;
+  Signal signal_info = 10;
+  string abort_message = 14;
+  map<uint32, Thread> threads = 16;
+  fixed64 skipped_fixed64 = 100;
+  fixed32 skipped_fixed32 = 101;
+}
+
+message Signal {
+  int32 number = 1;
+  string name = 2;
+  int32 code = 3;
+  string code_name = 4;
+  bool has_fault_address = 8;
+  uint64 fault_address = 9;
+}
+
+message Register {
+  string name = 1;
+  uint64 u64 = 2;
+}
+
+message Thread {
+  int32 id = 1;
+  string name = 2;
+  repeated Register registers = 3;
+  repeated BacktraceFrame current_backtrace = 4;
+}
+
+message BacktraceFrame {
+  uint64 rel_pc = 1;
+  uint64 pc = 2;
+  uint64 sp = 3;
+  string function_name = 4;
+  uint64 function_offset = 5;
+  string file_name = 6;
+  uint64 file_map_offset = 7;
+  string build_id = 8;
+}
