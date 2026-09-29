@@ -111,11 +111,13 @@ class NativeCrashDrain {
   ///
   /// That moves the point of no return: the platform's copy is released
   /// before the collector has the report, so the spool's own limits apply to
-  /// it from then on. A file dropped after `spoolMaxAttempts` failed
-  /// deliveries, or evicted by `spoolMaxBatches` or `spoolMaxAge`, takes its
-  /// crash reports with it — with one warning for the first, none for the
-  /// second. This is the accepted trade for keeping the network off the boot
-  /// path, and it is the same one every other spooled batch already makes.
+  /// it from then on, and the file may be the only copy. Those limits are
+  /// narrow on purpose. Being offline never counts against the file, so it is
+  /// dropped after `spoolMaxAttempts` failures only when the collector is
+  /// demonstrably accepting other batches and still refusing this one, with
+  /// one warning. The bounds that remain are `spoolMaxAge`, which is
+  /// unconditional, and `spoolMaxBatches`, which evicts every ordinary batch
+  /// before it touches one marked here as a crash report.
   ///
   /// Without a spool, or when it cannot be written, the export is started
   /// without being awaited and the acknowledgement follows only if the
@@ -147,7 +149,8 @@ class NativeCrashDrain {
     if (records.isEmpty) return 0;
 
     final LogRecordExporter target = exporter;
-    if (target is SpoolingLogRecordExporter && await target.enqueue(records)) {
+    if (target is SpoolingLogRecordExporter &&
+        await target.enqueue(records, evictLast: true)) {
       await _acknowledge(delivered);
       return records.length;
     }

@@ -161,16 +161,7 @@ void main() {
       expect(_spoolFiles(directory), isEmpty);
     });
 
-    test('a refusal is counted in the file name', () async {
-      await spool.export(<ReadableLogRecord>[_record()]);
-
-      expect(_spoolFiles(directory).single.path, endsWith('-1.spool.json'));
-
-      await spool.replay();
-      expect(_spoolFiles(directory).single.path, endsWith('-2.spool.json'));
-    });
-
-    test('a failure that reaches the cap on export drops the batch', () async {
+    test('a refusal on export is not counted against the file', () async {
       final List<String> warnings = <String>[];
       final SpoolingLogRecordExporter once = SpoolingLogRecordExporter(
         delegate: delegate,
@@ -179,14 +170,24 @@ void main() {
         onWarning: warnings.add,
       );
 
-      final ExportResult result = await once.export(<ReadableLogRecord>[
-        _record(),
-      ]);
+      // Refused, and it may only mean there is no signal. Kept, and reported
+      // as success because it is durable; only a later replay may count it.
+      for (int i = 0; i < 3; i++) {
+        expect(
+          await once.export(<ReadableLogRecord>[_record(body: 'b$i')]),
+          ExportResult.success,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 3));
+      }
 
-      // Not spooled, so the delegate's own answer is what the caller sees.
-      expect(result, ExportResult.failure);
-      expect(_spoolFiles(directory), isEmpty);
-      expect(warnings, hasLength(1));
+      expect(_spoolFiles(directory), hasLength(3));
+      expect(
+        _spoolFiles(
+          directory,
+        ).every((File f) => f.path.endsWith('-0.spool.json')),
+        isTrue,
+      );
+      expect(warnings, isEmpty);
     });
 
     test('an unwritable directory still delivers directly', () async {
@@ -320,18 +321,24 @@ void main() {
     test(
       'a file an older release wrote, with no count, still replays',
       () async {
-        final File legacy = File(
-          '${directory.path}/0000000000000001-0.spool.json',
+        Future<void> seed(
+          String name,
+          String body,
+        ) => File('${directory.path}/$name.spool.json').writeAsString(
+          '{"v":1,"resource":{},"records":[{"body":"$body","severity":"WARN"}]}',
         );
-        await legacy.writeAsString(
-          '{"v":1,"resource":{},"records":[{"body":"old","severity":"WARN"}]}',
-        );
+        await seed('0000000000000001-0', 'old');
+        await seed('0000000000000002-0', 'newer');
+        // The collector takes one and refuses the other, so the refusal is
+        // the file's own and is counted.
+        delegate
+          ..failing = false
+          ..refused.add('old');
 
-        expect(await spool.replay(), 0);
-        // Refused once, so it now carries a count of one.
+        expect(await spool.replay(), 1);
         expect(_spoolFiles(directory).single.path, endsWith('-0-1.spool.json'));
 
-        delegate.failing = false;
+        delegate.refused.clear();
         expect(await spool.replay(), 1);
         expect(_spoolFiles(directory), isEmpty);
       },
@@ -372,97 +379,165 @@ void main() {
     });
   });
 
-  group('a batch that is never accepted', () {
+  group('the attempt cap', () {
     late List<String> warnings;
-    late SpoolingLogRecordExporter capped;
 
-    setUp(() {
-      warnings = <String>[];
-      capped = SpoolingLogRecordExporter(
-        delegate: delegate,
-        directory: directory,
-        maxAge: null,
-        maxAttempts: 3,
-        onWarning: warnings.add,
-      );
-    });
-
-    Future<void> spoolHeadAndTail() async {
-      // Offline for both, so both are on disk; the head is then refused for
-      // good while the collector takes anything else.
-      await capped.export(<ReadableLogRecord>[_record(body: 'head')]);
-      await Future<void>.delayed(const Duration(milliseconds: 5));
-      await capped.export(<ReadableLogRecord>[_record(body: 'tail')]);
-      delegate
-        ..failing = false
-        ..refused.add('head')
-        ..batches.clear();
-    }
-
-    test('is dropped after the cap and no longer blocks the next', () async {
-      await spoolHeadAndTail();
-
-      // One failure was the export itself, so the second is the last.
-      expect(await capped.replay(), 0);
-      expect(warnings, isEmpty);
-      // Stopping at the head is deliberate: the tail has not been tried.
-      expect(delegate.batches, hasLength(1));
-
-      expect(await capped.replay(), 1);
-      expect(warnings, hasLength(1));
-      expect(warnings.single, contains('3 failed delivery attempts'));
-      expect(_spoolFiles(directory), isEmpty);
-      expect(
-        delegate.batches.last.single.body,
-        'tail',
-        reason: 'the head was dropped and replay moved on to the tail',
-      );
-    });
-
-    test('is dropped exactly once, however many replays follow', () async {
-      await spoolHeadAndTail();
-
-      for (int i = 0; i < 6; i++) {
-        await capped.replay();
-      }
-
-      expect(warnings, hasLength(1));
-    });
-
-    test(
-      'keeps counting across exporters, because the count is on disk',
-      () async {
-        await spoolHeadAndTail();
-        await capped.replay();
-
-        final SpoolingLogRecordExporter next = SpoolingLogRecordExporter(
+    SpoolingLogRecordExporter launch({int maxAttempts = 3}) =>
+        SpoolingLogRecordExporter(
           delegate: delegate,
           directory: directory,
           maxAge: null,
-          maxAttempts: 3,
+          maxAttempts: maxAttempts,
           onWarning: warnings.add,
         );
-        expect(await next.replay(), 1);
+
+    /// Spools [bodies] while the collector is unreachable.
+    Future<void> spoolOffline(List<String> bodies) async {
+      delegate.failing = true;
+      final SpoolingLogRecordExporter writer = launch();
+      for (final String body in bodies) {
+        await writer.export(<ReadableLogRecord>[_record(body: body)]);
+        await Future<void>.delayed(const Duration(milliseconds: 3));
+      }
+    }
+
+    /// The collector answers, but refuses the batch with this body for good.
+    void poison(String body) {
+      delegate
+        ..failing = false
+        ..refused.add(body)
+        ..batches.clear();
+    }
+
+    setUp(() => warnings = <String>[]);
+
+    test('offline for ten launches drops nothing', () async {
+      await spoolOffline(<String>['one', 'two', 'three']);
+
+      for (int launchNumber = 0; launchNumber < 10; launchNumber++) {
+        expect(await launch().replay(), 0);
+      }
+
+      expect(_spoolFiles(directory), hasLength(3));
+      expect(
+        _spoolFiles(
+          directory,
+        ).every((File f) => f.path.endsWith('-0.spool.json')),
+        isTrue,
+        reason: 'no failure was counted while nothing was answering',
+      );
+      expect(warnings, isEmpty);
+    });
+
+    test('an offline pass tries the head and one probe, then stops', () async {
+      await spoolOffline(<String>['one', 'two', 'three']);
+      delegate.batches.clear();
+
+      await launch().replay();
+
+      // The head, and the one file that proves the network is down. Not the
+      // third: that would spend the radio to learn the same thing.
+      expect(delegate.batches, hasLength(2));
+    });
+
+    test(
+      'a poisoned head is dropped after N passes and the next is delivered',
+      () async {
+        // A fresh exporter and a fresh healthy file behind the head on every
+        // launch, so nothing but the probe rule can be what counts.
+        await spoolOffline(<String>['poison']);
+
+        for (int pass = 1; pass <= 3; pass++) {
+          delegate.failing = true;
+          await launch().export(<ReadableLogRecord>[_record(body: 'ok$pass')]);
+          await Future<void>.delayed(const Duration(milliseconds: 3));
+          poison('poison');
+          expect(await launch().replay(), 1, reason: 'ok$pass was delivered');
+          expect(warnings, hasLength(pass == 3 ? 1 : 0));
+        }
+
+        expect(warnings.single, contains('3 failed delivery attempts'));
+        expect(_spoolFiles(directory), isEmpty);
+      },
+    );
+
+    test(
+      'the pass carries on past the probe once the collector works',
+      () async {
+        await spoolOffline(<String>['poison', 'two', 'three']);
+        poison('poison');
+
+        expect(await launch().replay(), 2);
+
+        expect(_spoolFiles(directory).single.path, endsWith('-1.spool.json'));
+        expect(
+          delegate.batches.map((List<ReadableLogRecord> b) => b.single.body),
+          <Object?>['poison', 'two', 'three'],
+        );
+      },
+    );
+
+    test(
+      'a lone poisoned file is counted when this process just delivered',
+      () async {
+        await spoolOffline(<String>['poison']);
+        final SpoolingLogRecordExporter live = launch();
+        poison('poison');
+        // Live traffic getting through is the probe there is no second file
+        // for.
+        expect(
+          await live.export(<ReadableLogRecord>[_record(body: 'live')]),
+          ExportResult.success,
+        );
+        expect(live.lastDeliverySuccessAt, isNotNull);
+
+        for (int pass = 1; pass <= 3; pass++) {
+          expect(await live.replay(), 0);
+        }
+
+        expect(_spoolFiles(directory), isEmpty);
         expect(warnings, hasLength(1));
       },
     );
+
+    test('a lone file that has never seen a success is not counted', () async {
+      await spoolOffline(<String>['alone']);
+
+      for (int launchNumber = 0; launchNumber < 10; launchNumber++) {
+        await launch().replay();
+      }
+
+      expect(_spoolFiles(directory).single.path, endsWith('-0.spool.json'));
+      expect(warnings, isEmpty);
+    });
+
+    test('the count is on disk, so it carries across exporters', () async {
+      await spoolOffline(<String>['poison', 'two']);
+      poison('poison');
+      await launch().replay();
+      expect(_spoolFiles(directory).single.path, endsWith('-1.spool.json'));
+
+      // A different launch, another healthy neighbour.
+      delegate.failing = true;
+      await launch().export(<ReadableLogRecord>[_record(body: 'three')]);
+      poison('poison');
+      await launch().replay();
+      expect(_spoolFiles(directory).single.path, endsWith('-2.spool.json'));
+    });
 
     test('a warning that throws does not stop the replay', () async {
       final SpoolingLogRecordExporter noisy = SpoolingLogRecordExporter(
         delegate: delegate,
         directory: directory,
         maxAge: null,
-        maxAttempts: 2,
+        maxAttempts: 1,
         onWarning: (String _) => throw StateError('talker is down'),
       );
-      await noisy.export(<ReadableLogRecord>[_record(body: 'head')]);
-      await Future<void>.delayed(const Duration(milliseconds: 5));
-      await noisy.export(<ReadableLogRecord>[_record(body: 'tail')]);
-      delegate
-        ..failing = false
-        ..refused.add('head');
+      await spoolOffline(<String>['poison', 'tail']);
+      poison('poison');
 
       expect(await noisy.replay(), 1);
+      expect(_spoolFiles(directory), isEmpty);
     });
   });
 
@@ -571,6 +646,59 @@ void main() {
       expect(kept, contains('two'));
       expect(kept, contains('three'));
     });
+
+    test('a crash batch is evicted only after every ordinary one', () async {
+      final SpoolingLogRecordExporter capped = SpoolingLogRecordExporter(
+        delegate: delegate,
+        directory: directory,
+        maxBatches: 2,
+        maxAge: null,
+      );
+
+      // The oldest file, and the only one marked.
+      await capped.enqueue(<ReadableLogRecord>[
+        _record(body: 'crash'),
+      ], evictLast: true);
+      await capped.settled();
+      for (final String body in <String>['one', 'two']) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        await capped.export(<ReadableLogRecord>[_record(body: body)]);
+      }
+
+      final String kept = _spoolFiles(
+        directory,
+      ).map((File f) => f.readAsStringSync()).join('\n');
+      expect(_spoolFiles(directory), hasLength(2));
+      expect(kept, contains('crash'));
+      expect(kept, isNot(contains('one')));
+      expect(kept, contains('two'));
+    });
+
+    test(
+      'crash batches are evicted oldest-first once nothing else is left',
+      () async {
+        final SpoolingLogRecordExporter capped = SpoolingLogRecordExporter(
+          delegate: delegate,
+          directory: directory,
+          maxBatches: 1,
+          maxAge: null,
+        );
+
+        for (final String body in <String>['first', 'second']) {
+          await capped.enqueue(<ReadableLogRecord>[
+            _record(body: body),
+          ], evictLast: true);
+          await capped.settled();
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+        }
+
+        final String kept = _spoolFiles(
+          directory,
+        ).map((File f) => f.readAsStringSync()).join('\n');
+        expect(kept, contains('second'));
+        expect(kept, isNot(contains('first')));
+      },
+    );
 
     test('drops a file older than the age cap', () async {
       final String staleStamp = DateTime.now()

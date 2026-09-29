@@ -274,6 +274,24 @@ void main() {
       },
     );
 
+    test('the spooled crash batch is marked to be evicted last', () async {
+      final SpoolingLogRecordExporter spool = SpoolingLogRecordExporter(
+        delegate: _RecordingExporter(result: ExportResult.failure),
+        directory: directory,
+        maxAge: null,
+      );
+
+      await drain(_FakeSource(<NativeCrashReport>[_report()]), spool).drain();
+      await spool.settled();
+
+      // The acknowledged report may be the only copy left, so the count cap
+      // must not evict it before ordinary telemetry.
+      expect(
+        directory.listSync().whereType<File>().single.path,
+        contains('-evict-'),
+      );
+    });
+
     test(
       'an acknowledged report is delivered once, and the file goes',
       () async {

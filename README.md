@@ -183,19 +183,25 @@ await observability.start(serviceVersion: '1.2.3');
   to replay, never half of one. The price is one extra write per exported
   batch, which is small above the `warning` floor.
 - **Deleted on acceptance.** `start()` replays oldest first without waiting for
-  it. A refusal is counted in the file's name (a rename, so it is atomic and
-  survives a kill), and replay stops at that file, keeping it and the rest for
-  the launch after.
+  it. When a file is refused, one more file is tried as a probe. If the probe
+  is accepted the collector works, so the refusal is the file's own: it is
+  counted in the file's name (a rename, so it is atomic and survives a kill)
+  and the pass carries on. If the probe is refused too, the phone is offline:
+  nothing is counted and the pass stops. Being offline never spends a file's
+  attempts, however many launches it lasts.
 - **A batch that is never taken is dropped.** The exporter reports only
   success or failure, so a batch the collector refuses for good (a 400, a 413)
   looks like one refused because the phone is offline. After
-  `spoolMaxAttempts` failures (default 5, the first send counting as one) the
-  file is dropped with one warning on the talker and replay moves on to the
-  batches behind it. The other side of that trade: a phone offline for that
-  many launches loses its oldest batch.
+  `spoolMaxAttempts` counted failures (default 5) the file is dropped with one
+  warning on the talker and replay moves on. With no second file to probe with,
+  a batch this process delivered in the last few minutes stands in for it;
+  with none, nothing is counted. A lone poisoned file with no traffic behind
+  it is therefore never dropped by count, and `spoolMaxAge` is its bound.
+  Failed live sends never count on their own, only a later replay does.
 - **Bounded.** `spoolMaxBatches` (default 32) evicts the oldest file past the
-  cap and `spoolMaxAge` (default 7 days) drops files past their age; a phone
-  that never reconnects must not fill its disk with telemetry nobody collected.
+  cap, ordinary batches before crash reports, and `spoolMaxAge` (default 7
+  days) drops files past their age whatever they hold; a phone that never
+  reconnects must not fill its disk with telemetry nobody collected.
 - **Failure is not fatal.** An unwritable directory sends the batch straight
   to the collector, as if there were no spool, and nothing is thrown into the
   app.
@@ -228,8 +234,11 @@ a crash report on a bad connection never delays the first frame.
   re-reads it on the next launch. In that case the count in the start-up line
   is of reports handed off, not of reports the collector has taken.
   Acknowledging on durability means the spool's limits then apply to the
-  report: a file dropped after `spoolMaxAttempts` failures, or evicted by
-  `spoolMaxBatches` or `spoolMaxAge`, takes its crash reports with it.
+  report, and the file may be the only copy. They are narrow: being offline is
+  never counted against it, a file is dropped by count only when the collector
+  is accepting other batches and refusing this one, `spoolMaxBatches` evicts
+  every ordinary batch before a crash report, and `spoolMaxAge` is the one
+  unconditional bound.
 - **Redacted like everything else.** `redact` is applied to the message, the
   stack trace and the attributes, because a native stack is the densest PII the
   package ever handles. A redactor that throws drops the report rather than

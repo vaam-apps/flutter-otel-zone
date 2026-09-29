@@ -34,12 +34,16 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// that never reconnects does not accumulate forever. Both exist because
   /// the alternative to a bounded spool is unbounded disk use.
   ///
-  /// [maxAttempts] is how many failed deliveries a file survives before it is
-  /// dropped, and is treated as at least 1. It exists because the delegate
-  /// only says `failure`, never *why*: a batch the collector refuses for good
-  /// (a 400, a 413) looks exactly like one refused because the phone is in a
-  /// tunnel. A count is the only signal that separates them, and without it
-  /// such a file is retried at the head of the queue until [maxAge].
+  /// [maxAttempts] is how many *counted* failures a file survives before it is
+  /// dropped, and is treated as at least 1. A failure is counted only in a
+  /// [replay] pass in which the collector demonstrably works — another file
+  /// was delivered in the same pass, or this process delivered something
+  /// moments ago. The delegate only says `failure`, never *why*, so a batch
+  /// the collector refuses for good (a 400, a 413) looks exactly like one
+  /// refused because the phone is in a tunnel. Counting every failure would
+  /// make being offline the thing that destroys data; counting only the ones
+  /// that happen while the collector is answering others isolates the batch
+  /// that is the problem.
   ///
   /// [onWarning] receives one line when a file is dropped for that reason. It
   /// is never given anything but counts, and never throws into the exporter.
@@ -64,7 +68,7 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// The age past which a spool file is discarded, or `null` for no age cap.
   final Duration? maxAge;
 
-  /// The failed deliveries a spool file survives before it is dropped.
+  /// The counted failures a spool file survives before it is dropped.
   final int maxAttempts;
 
   /// Told once each time a file is dropped after [maxAttempts] failures.
@@ -95,6 +99,16 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// Deliveries started by [enqueue], so a test can wait for them.
   final Set<Future<void>> _background = <Future<void>>{};
 
+  /// How long ago a success may be and still stand in for a probe.
+  static const Duration _freshSuccess = Duration(minutes: 5);
+
+  /// When the delegate last accepted a batch, by any path, in this process.
+  ///
+  /// It is what lets [replay] tell "the collector refused this file" from
+  /// "there is no collector" when there is no second file to try.
+  @visibleForTesting
+  DateTime? lastDeliverySuccessAt;
+
   /// Exports [logRecords], having put them on disk first.
   ///
   /// Never throws: an unwritable directory falls back to the delegate's own
@@ -116,13 +130,24 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// Returns `false` when the batch could not be written, in which case
   /// nothing has been sent and the caller still owns it.
   ///
+  /// [evictLast] marks the file so the cap on [maxBatches] evicts it only
+  /// after every unmarked file. The crash drain sets it: once a report is
+  /// acknowledged this file may be the only copy of it, and a run of ordinary
+  /// telemetry must not push it out.
+  ///
   /// This is what lets the crash drain acknowledge a report and return while
   /// the network is still being tried: durable is the promise, delivered is
   /// the aim.
-  Future<bool> enqueue(List<ReadableLogRecord> logRecords) async {
+  Future<bool> enqueue(
+    List<ReadableLogRecord> logRecords, {
+    bool evictLast = false,
+  }) async {
     if (logRecords.isEmpty) return true;
 
-    final _SpoolEntry? entry = await _writeAhead(logRecords);
+    final _SpoolEntry? entry = await _writeAhead(
+      logRecords,
+      evictLast: evictLast,
+    );
     if (entry == null) return false;
 
     late final Future<void> delivery;
@@ -146,13 +171,23 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// Replays every spool file, oldest first, and returns how many batches the
   /// delegate accepted.
   ///
-  /// A file is deleted only once the delegate has accepted it. On a refusal
-  /// the failure is recorded against that file and the loop stops, keeping it
-  /// and every later one — if the collector is unreachable, replaying the
-  /// rest only spends the radio to learn the same thing. A file that has now
-  /// failed [maxAttempts] times is dropped instead, and the loop carries on
-  /// to the next one: that is the only way a batch the collector will never
-  /// take stops standing in front of the ones it would.
+  /// A file is deleted only once the delegate has accepted it. When one is
+  /// refused, exactly one more file is tried as a probe, because a single
+  /// refusal cannot say whether the file or the network is at fault:
+  ///
+  /// * if the probe is accepted the collector works, so the refusal is the
+  ///   file's own. It is counted against it — dropped, with one warning, once
+  ///   it reaches [maxAttempts] — and the pass carries on past the probe;
+  /// * if the probe is refused too, the phone is offline. Nothing is counted
+  ///   and the pass stops, so being offline never spends a file's attempts
+  ///   and never spends the radio on the rest;
+  /// * with no second file, a batch this process delivered within the last
+  ///   few minutes ([lastDeliverySuccessAt]) stands in for the probe. With
+  ///   none, nothing is counted: a lone file that has never seen the
+  ///   collector answer is not evidence against it.
+  ///
+  /// The price is that a lone poisoned file with no traffic behind it is
+  /// never dropped by count; [maxAge] is its bound.
   ///
   /// Files another delivery already owns are skipped, not counted, so this is
   /// safe to run while [export] or [enqueue] is still working.
@@ -164,35 +199,87 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
     await _sweepTemps();
     final List<File> files = await _oldestFirst();
     int delivered = 0;
-    for (final File file in files) {
-      final _SpoolEntry entry = _SpoolEntry.parse(file);
-      // Claimed before the first await, so nothing else can pick it up
-      // between the listing above and the send below.
-      if (!_delivering.add(entry.stem)) continue;
+    for (int i = 0; i < files.length; i++) {
+      final _Replayed head = await _replayFile(files[i]);
+      if (head.outcome == _Outcome.delivered) {
+        delivered++;
+        continue;
+      }
+      if (head.outcome == _Outcome.skipped) continue;
+
+      final _SpoolEntry failed = head.entry!;
       try {
-        // Another replay may have finished with it since it was listed.
-        if (!await file.exists()) continue;
-
-        final List<ReadableLogRecord>? records = await _read(file);
-        if (records == null) {
-          await _delete(file);
-          continue;
+        bool collectorWorks = false;
+        bool probed = false;
+        int probe = i + 1;
+        for (; probe < files.length; probe++) {
+          final _Replayed next = await _replayFile(files[probe]);
+          if (next.outcome == _Outcome.skipped) continue;
+          probed = true;
+          if (next.outcome == _Outcome.delivered) {
+            delivered++;
+            collectorWorks = true;
+          } else {
+            _release(next.entry!);
+          }
+          break;
         }
+        if (!probed) collectorWorks = _succeededRecently();
+        if (!collectorWorks) break;
 
-        if (await _deliverDirectly(records) == ExportResult.success) {
-          await _delete(file);
-          delivered++;
-          continue;
-        }
-        if (await _recordFailure(entry, records.length)) break;
+        await _recordFailure(failed, head.recordCount);
+        i = probe;
       } finally {
-        _delivering.remove(entry.stem);
+        _release(failed);
       }
     }
     return delivered;
   }
 
+  bool _succeededRecently() {
+    final DateTime? last = lastDeliverySuccessAt;
+    return last != null && DateTime.now().difference(last) <= _freshSuccess;
+  }
+
+  void _release(_SpoolEntry entry) => _delivering.remove(entry.stem);
+
+  /// Claims and sends one spool file.
+  ///
+  /// A refused file keeps its claim, and the caller must [_release] it once
+  /// it has decided what the refusal means.
+  Future<_Replayed> _replayFile(File file) async {
+    final _SpoolEntry entry = _SpoolEntry.parse(file);
+    // Claimed before the first await, so nothing else can pick it up between
+    // the listing and the send.
+    if (!_delivering.add(entry.stem)) return const _Replayed.skipped();
+    bool keepClaim = false;
+    try {
+      // Another replay may have finished with it since it was listed.
+      if (!await file.exists()) return const _Replayed.skipped();
+
+      final List<ReadableLogRecord>? records = await _read(file);
+      if (records == null) {
+        await _delete(file);
+        return const _Replayed.skipped();
+      }
+
+      if (await _deliverDirectly(records) == ExportResult.success) {
+        await _delete(file);
+        return const _Replayed.delivered();
+      }
+      keepClaim = true;
+      return _Replayed.failed(entry, records.length);
+    } finally {
+      if (!keepClaim) _release(entry);
+    }
+  }
+
   /// Sends [logRecords] and settles what is on disk for [entry].
+  ///
+  /// A refusal here is not counted against the file. It may only mean the
+  /// phone is offline, and only a later [replay], which can check that the
+  /// collector works, is in a position to say otherwise. The file simply
+  /// stays, and the batch is reported as success because it is durable.
   ///
   /// Never throws. Releases the claim on [entry] however it ends.
   Future<ExportResult> _deliver(
@@ -205,34 +292,40 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
         await _delete(entry.file);
         return result;
       }
-      // Success if it stayed on disk, because it is durable; the delegate's
-      // own answer if it was dropped, because then it is not.
-      return await _recordFailure(entry, logRecords.length)
-          ? ExportResult.success
-          : result;
+      await _evict();
+      return ExportResult.success;
     } finally {
-      _delivering.remove(entry.stem);
+      _release(entry);
     }
   }
 
   Future<ExportResult> _deliverDirectly(
     List<ReadableLogRecord> logRecords,
   ) async {
+    ExportResult result;
     try {
-      return await delegate.export(logRecords);
+      result = await delegate.export(logRecords);
     } on Object {
-      return ExportResult.failure;
+      result = ExportResult.failure;
     }
+    if (result == ExportResult.success) lastDeliverySuccessAt = DateTime.now();
+    return result;
   }
 
   /// Writes [logRecords] to a new spool file and claims it for delivery.
   ///
   /// Returns `null` when the disk would not take it, with nothing left behind
   /// and no claim held.
-  Future<_SpoolEntry?> _writeAhead(List<ReadableLogRecord> logRecords) async {
-    final String stem =
-        '${DateTime.now().microsecondsSinceEpoch.toString().padLeft(16, '0')}'
-        '-${_sequence++}';
+  Future<_SpoolEntry?> _writeAhead(
+    List<ReadableLogRecord> logRecords, {
+    bool evictLast = false,
+  }) async {
+    final String micros = DateTime.now().microsecondsSinceEpoch
+        .toString()
+        .padLeft(16, '0');
+    final String stem = evictLast
+        ? '$micros-${_SpoolEntry.evictLastMarker}-${_sequence++}'
+        : '$micros-${_sequence++}';
     final _SpoolEntry entry = _SpoolEntry(directory, stem, 0);
     // Claimed before the file exists, so `replay` never sees it unowned.
     _delivering.add(stem);
@@ -263,33 +356,30 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
     }
   }
 
-  /// Counts one more failed delivery against [entry], and reports whether the
-  /// file is still on disk to be retried.
+  /// Counts one more failed delivery against [entry].
   ///
   /// The count lives in the file's name and is changed by a rename, which is
   /// atomic: a process killed here leaves the file under its old name or its
   /// new one, never in between, and never needs a sidecar file to agree with.
-  Future<bool> _recordFailure(_SpoolEntry entry, int recordCount) async {
+  Future<void> _recordFailure(_SpoolEntry entry, int recordCount) async {
     final int attempts = entry.attempts + 1;
     if (attempts >= (maxAttempts < 1 ? 1 : maxAttempts)) {
       await _delete(entry.file);
       _warn(
         'Dropped a spooled log batch of $recordCount '
         '${recordCount == 1 ? 'record' : 'records'} after $attempts failed '
-        'delivery ${attempts == 1 ? 'attempt' : 'attempts'}',
+        'delivery ${attempts == 1 ? 'attempt' : 'attempts'} while the '
+        'collector was accepting others',
       );
-      return false;
+      return;
     }
     try {
-      await entry.file.rename(
-        _SpoolEntry(directory, entry.stem, attempts).file.path,
-      );
+      await entry.file.rename(entry.withAttempts(directory, attempts).path);
     } on Object {
       // Evicted while it was in flight, or the directory went read-only. The
       // file keeps its old count and is simply tried again next time.
     }
     await _evict();
-    return true;
   }
 
   void _warn(String message) {
@@ -300,11 +390,23 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
     }
   }
 
+  /// Enforces the two bounds on the spool: [maxBatches] and [maxAge].
+  ///
+  /// Past the count cap the oldest ordinary file goes first, and a file
+  /// marked `evictLast` only once none is left — it may be the only copy of
+  /// an acknowledged crash report. The age cap has no such preference: it is
+  /// the one bound that is unconditional, so a phone that never reconnects
+  /// still cannot keep anything forever.
   Future<void> _evict() async {
     await _sweepTemps();
     final List<File> files = await _oldestFirst();
-    if (files.length > maxBatches) {
-      for (final File file in files.take(files.length - maxBatches)) {
+    final int excess = files.length - maxBatches;
+    if (excess > 0) {
+      final List<File> ordered = <File>[
+        ...files.where((File f) => !_SpoolEntry.parse(f).evictLast),
+        ...files.where((File f) => _SpoolEntry.parse(f).evictLast),
+      ];
+      for (final File file in ordered.take(excess)) {
         await _delete(file);
       }
     }
@@ -534,10 +636,12 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
 
 /// One spool file, as its name describes it.
 ///
-/// The name is `<microseconds>-<sequence>-<attempts>.spool.json`. The leading
-/// pair is the file's identity and never changes; the trailing count is the
-/// failed deliveries so far, and is the only part a rename rewrites. A file
-/// with no count — one an older release wrote — has had none.
+/// The name is `<microseconds>-<sequence>-<attempts>.spool.json`, or
+/// `<microseconds>-evict-<sequence>-<attempts>.spool.json` for a file marked
+/// to be evicted last. The leading part is the file's identity and
+/// never changes; the trailing count is the failures counted so far, and is
+/// the only part a rename rewrites. A file with no count — one an older
+/// release wrote — has had none.
 final class _SpoolEntry {
   _SpoolEntry(Directory directory, this.stem, this.attempts)
     : file = File(
@@ -552,12 +656,30 @@ final class _SpoolEntry {
       0,
       name.length - SpoolingLogRecordExporter._suffix.length,
     );
-    final List<String> parts = base.split('-');
-    final int? attempts = parts.length == 3 ? int.tryParse(parts[2]) : null;
-    return attempts == null
-        ? _SpoolEntry._(file, base, 0)
-        : _SpoolEntry._(file, '${parts[0]}-${parts[1]}', attempts);
+    final int? attempts = _trailingCount(base);
+    if (attempts == null) return _SpoolEntry._(file, base, 0);
+    return _SpoolEntry._(
+      file,
+      base.substring(0, base.lastIndexOf('-')),
+      attempts,
+    );
   }
+
+  /// The count on the end of [base], or `null` for an older file without one.
+  ///
+  /// A name is `micros-seq` (old, no count), `micros-seq-n`, or
+  /// `micros-evict-seq-n`; only the last of those parts can be the count,
+  /// and only when there is one more part than the identity needs.
+  static int? _trailingCount(String base) {
+    final List<String> parts = base.split('-');
+    final int identityLength = parts.length > 1 && parts[1] == evictLastMarker
+        ? 3
+        : 2;
+    return parts.length == identityLength + 1 ? int.tryParse(parts.last) : null;
+  }
+
+  /// Sits between the timestamp and the sequence of an evict-last file.
+  static const String evictLastMarker = 'evict';
 
   /// The file on disk, under the name it has now.
   final File file;
@@ -565,6 +687,33 @@ final class _SpoolEntry {
   /// What identifies the batch across renames.
   final String stem;
 
-  /// The failed deliveries recorded so far.
+  /// The failures counted so far.
   final int attempts;
+
+  /// Whether the count cap evicts this file only after every unmarked one.
+  bool get evictLast => stem.split('-').length > 2;
+
+  /// This file's path once it carries [count] failures.
+  File withAttempts(Directory directory, int count) =>
+      _SpoolEntry(directory, stem, count).file;
+}
+
+enum _Outcome { delivered, failed, skipped }
+
+/// What [SpoolingLogRecordExporter.replay] learned from one file.
+final class _Replayed {
+  const _Replayed.delivered()
+    : outcome = _Outcome.delivered,
+      entry = null,
+      recordCount = 0;
+  const _Replayed.skipped()
+    : outcome = _Outcome.skipped,
+      entry = null,
+      recordCount = 0;
+  const _Replayed.failed(_SpoolEntry this.entry, this.recordCount)
+    : outcome = _Outcome.failed;
+
+  final _Outcome outcome;
+  final _SpoolEntry? entry;
+  final int recordCount;
 }

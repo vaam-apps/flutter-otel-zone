@@ -198,16 +198,19 @@ final class OtelZoneConfig {
   /// The age past which a spool file is discarded, or `null` for no age cap.
   final Duration? spoolMaxAge;
 
-  /// How many failed deliveries a spooled batch survives before it is
+  /// How many counted failures a spooled batch survives before it is
   /// dropped, with one warning, so it stops standing in front of the batches
   /// behind it.
   ///
-  /// Each launch's replay is one attempt, and so is the send that first
-  /// wrote it. The exporter cannot tell a collector that is unreachable from
-  /// one that will never take this batch (a 400, a 413), so the count is the
-  /// only thing that ends the second case; the price is that a phone offline
-  /// for this many launches loses its oldest batch. Values below 1 are
-  /// treated as 1.
+  /// A failure is counted only in a replay pass where the collector
+  /// demonstrably works — another batch was delivered in the same pass, or
+  /// this process delivered one moments ago. The exporter cannot tell a
+  /// collector that is unreachable from one that will never take this batch
+  /// (a 400, a 413), so being offline is never counted: a phone can spend any
+  /// number of launches without a connection and lose nothing to this. The
+  /// price is that a lone poisoned batch with no traffic behind it is never
+  /// dropped by count; [spoolMaxAge] bounds it. Values below 1 are treated as
+  /// 1.
   final int spoolMaxAttempts;
 
   final String? _loggerName;
