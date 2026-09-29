@@ -314,10 +314,10 @@ therefore name the build that reported the crash, not the one that died, and
 symbols get fetched for the wrong binary. So every native crash record carries
 two attributes of its own:
 
-| Attribute                          | Android            | iOS                          |
-| ---------------------------------- | ------------------ | ---------------------------- |
-| `otel_zone.crashed.service.version` | `versionName`      | `CFBundleShortVersionString` |
-| `otel_zone.crashed.app.build_id`    | `longVersionCode`  | `CFBundleVersion`            |
+| Attribute                           | Android           | iOS                          |
+| ----------------------------------- | ----------------- | ---------------------------- |
+| `otel_zone.crashed.service.version` | `versionName`     | `CFBundleShortVersionString` |
+| `otel_zone.crashed.app.build_id`    | `longVersionCode` | `CFBundleVersion`            |
 
 They are the same two names on both platforms, and they describe the build that
 was **running when it died**, whichever build reports it: a crash from 1.0.0+1
