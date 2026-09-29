@@ -158,9 +158,10 @@ unredacted — it fails closed, and it never throws into the app.
 
 ## Faults recorded offline
 
-A batch the collector refuses is retried in memory and then dropped. Point
-`spoolDirectory` at app-private storage and it is written to disk instead, and
-replayed on the next `start()`:
+A batch the collector refuses is retried in memory and then dropped, and one in
+flight when the process is killed is simply gone. Point `spoolDirectory` at
+app-private storage and every batch is written to disk before it is sent, and
+what is left is replayed on the next `start()`:
 
 ```dart
 final OtelZone observability = OtelZone(
@@ -176,17 +177,34 @@ final OtelZone observability = OtelZone(
 await observability.start(serviceVersion: '1.2.3');
 ```
 
-- **Write-ahead.** The exporter is tried first, so a healthy collector never
-  pays for a disk write. Only a refused batch is spooled, and it is written to
-  a temp file and renamed, so a process death leaves a whole batch or none.
-- **Deleted on acceptance.** A file is removed only once the collector has
-  taken it. `start()` replays oldest first and stops at the first refusal,
-  keeping that file and the rest for the launch after.
+- **Write-ahead.** A batch is written to a temp file and renamed *before* the
+  network is tried, and deleted once the collector has taken it. A process
+  killed mid-request therefore leaves a whole batch on disk for the next launch
+  to replay, never half of one. The price is one extra write per exported
+  batch, which is small above the `warning` floor.
+- **Deleted on acceptance.** `start()` replays oldest first without waiting for
+  it. When a file is refused, one more file is tried as a probe. If the probe
+  is accepted the collector works, so the refusal is the file's own: it is
+  counted in the file's name (a rename, so it is atomic and survives a kill)
+  and the pass carries on. If the probe is refused too, the phone is offline:
+  nothing is counted and the pass stops. Being offline never spends a file's
+  attempts, however many launches it lasts.
+- **A batch that is never taken is dropped.** The exporter reports only
+  success or failure, so a batch the collector refuses for good (a 400, a 413)
+  looks like one refused because the phone is offline. After
+  `spoolMaxAttempts` counted failures (default 5) the file is dropped with one
+  warning on the talker and replay moves on. With no second file to probe with,
+  a batch this process delivered in the last few minutes stands in for it;
+  with none, nothing is counted. A lone poisoned file with no traffic behind
+  it is therefore never dropped by count, and `spoolMaxAge` is its bound.
+  Failed live sends never count on their own, only a later replay does.
 - **Bounded.** `spoolMaxBatches` (default 32) evicts the oldest file past the
-  cap and `spoolMaxAge` (default 7 days) drops files past their age; a phone
-  that never reconnects must not fill its disk with telemetry nobody collected.
-- **Failure is not fatal.** An unwritable directory falls back to the plain
-  exporter's own result, and nothing is thrown into the app.
+  cap, ordinary batches before crash reports, and `spoolMaxAge` (default 7
+  days) drops files past their age whatever they hold; a phone that never
+  reconnects must not fill its disk with telemetry nobody collected.
+- **Failure is not fatal.** An unwritable directory sends the batch straight
+  to the collector, as if there were no spool, and nothing is thrown into the
+  app.
 - **The original resource rides along**, so a crash stays filed under the
   version that crashed rather than whichever one was running when it was
   finally delivered. Replayed records carry `otel_zone.replayed = true`.
@@ -198,18 +216,29 @@ the OS's own record of the death — `ApplicationExitInfo` on Android, MetricKit
 on iOS — and hand it to Dart over one Pigeon channel. `start()` drains it:
 
 ```text
-pending() -> redact -> FATAL LogRecord -> spool -> acknowledge
+pending() -> redact -> FATAL LogRecord -> spool -> acknowledge -> return
 ```
+
+`start()` returns once that is done; delivery carries on in the background, so
+a crash report on a bad connection never delays the first frame.
 
 - **FATAL, and not a breadcrumb.** A recovered crash is emitted straight onto
   the export path as a `Severity.FATAL` record with `event.name` of
   `device.crash` or `device.anr`; it does not go through `Talker` and is not
   gated by `exportFloor`. A record of the process dying is not something the
   live-app floor gets to drop.
-- **Acknowledged only when durable.** The reports are acknowledged only after
-  the exporter has accepted the batch, so an offline phone re-reads them on the
-  next launch rather than dropping them. With `spoolDirectory` set they are on
-  disk first; without it they go straight to the collector.
+- **Acknowledged only when durable.** With `spoolDirectory` set, a report is
+  acknowledged as soon as it is on disk, and the spool delivers it. Without a
+  spool there is nowhere durable to put it, so it is sent in the background and
+  acknowledged only once the collector has accepted it; a phone that is offline
+  re-reads it on the next launch. In that case the count in the start-up line
+  is of reports handed off, not of reports the collector has taken.
+  Acknowledging on durability means the spool's limits then apply to the
+  report, and the file may be the only copy. They are narrow: being offline is
+  never counted against it, a file is dropped by count only when the collector
+  is accepting other batches and refusing this one, `spoolMaxBatches` evicts
+  every ordinary batch before a crash report, and `spoolMaxAge` is the one
+  unconditional bound.
 - **Redacted like everything else.** `redact` is applied to the message, the
   stack trace and the attributes, because a native stack is the densest PII the
   package ever handles. A redactor that throws drops the report rather than
@@ -280,6 +309,17 @@ The channel is generated, not written by hand:
 ```bash
 dart run pigeon --input pigeons/native_crash.dart && dart format .
 ```
+
+## Headers
+
+`OTEL_EXPORTER_OTLP_HEADERS` (or `OTEL_EXPORTER_OTLP_LOGS_HEADERS`, which wins),
+from the environment or `--dart-define`, is resolved once by dartastic's own
+`OTelEnv` and sent on every path this package builds an exporter for: the live
+records, the spool's replay, and the crash drain. There is one factory, so a
+header cannot reach the plain path and be missing from the crash path. Header
+values are credentials and are never logged. dartastic parses the variable
+itself and does not URL-decode values as the OTLP specification asks; that is
+inherited, not worked around.
 
 ## Telemetry never blocks the app
 

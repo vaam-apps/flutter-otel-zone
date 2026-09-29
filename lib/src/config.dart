@@ -63,6 +63,7 @@ final class OtelZoneConfig {
     this.spoolDirectory,
     this.spoolMaxBatches = 32,
     this.spoolMaxAge = const Duration(days: 7),
+    this.spoolMaxAttempts = 5,
     bool? secure,
   }) : _loggerName = loggerName,
        _secure = secure;
@@ -173,14 +174,15 @@ final class OtelZoneConfig {
   /// default reader.
   final bool enableMetrics;
 
-  /// Where failed batches are spooled, or `null` for no spooling.
+  /// Where batches are spooled, or `null` for no spooling.
   ///
   /// `null` is the default and the behaviour every existing build has: a
   /// batch the collector refuses is retried in memory and then dropped.
   /// Supply a provider — `getApplicationSupportDirectory` from
-  /// `path_provider`, read after the binding exists — to add a durable step
-  /// between "refused" and "dropped", and have [OtelZone.start] replay what
-  /// is left on the next launch.
+  /// `path_provider`, read after the binding exists — and every batch is
+  /// written there *before* it is sent and deleted once the collector has
+  /// taken it, so a refusal, or a process killed mid-request, leaves it on
+  /// disk. [OtelZone.start] replays what is left on the next launch.
   ///
   /// A function rather than a [Directory] because the directory does not
   /// exist to be named until the platform channels do, which is after this
@@ -195,6 +197,21 @@ final class OtelZoneConfig {
 
   /// The age past which a spool file is discarded, or `null` for no age cap.
   final Duration? spoolMaxAge;
+
+  /// How many counted failures a spooled batch survives before it is
+  /// dropped, with one warning, so it stops standing in front of the batches
+  /// behind it.
+  ///
+  /// A failure is counted only in a replay pass where the collector
+  /// demonstrably works — another batch was delivered in the same pass, or
+  /// this process delivered one moments ago. The exporter cannot tell a
+  /// collector that is unreachable from one that will never take this batch
+  /// (a 400, a 413), so being offline is never counted: a phone can spend any
+  /// number of launches without a connection and lose nothing to this. The
+  /// price is that a lone poisoned batch with no traffic behind it is never
+  /// dropped by count; [spoolMaxAge] bounds it. Values below 1 are treated as
+  /// 1.
+  final int spoolMaxAttempts;
 
   final String? _loggerName;
   final bool? _secure;

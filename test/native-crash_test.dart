@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:dartastic_opentelemetry/dartastic_opentelemetry.dart';
@@ -34,11 +35,17 @@ class _RecordingExporter implements LogRecordExporter {
   _RecordingExporter({this.result = ExportResult.success});
 
   ExportResult result;
+
+  /// When set, an export waits for it — and never answering is a collector
+  /// that has stopped responding.
+  Future<void>? hold;
+
   final List<List<ReadableLogRecord>> batches = <List<ReadableLogRecord>>[];
 
   @override
   Future<ExportResult> export(List<ReadableLogRecord> logRecords) async {
     batches.add(logRecords);
+    await hold;
     return result;
   }
 
@@ -111,7 +118,9 @@ void main() {
       ]);
       final _RecordingExporter exporter = _RecordingExporter();
 
-      expect(await drain(source, exporter).drain(), 2);
+      final NativeCrashDrain subject = drain(source, exporter);
+      expect(await subject.drain(), 2);
+      await subject.settled();
 
       final List<ReadableLogRecord> records = exporter.batches.single;
       expect(records, hasLength(2));
@@ -142,7 +151,9 @@ void main() {
     ]);
     final _RecordingExporter exporter = _RecordingExporter();
 
-    await drain(source, exporter).drain();
+    final NativeCrashDrain subject = drain(source, exporter);
+    await subject.drain();
+    await subject.settled();
 
     expect(
       exporter.batches.single.single.attributes?.getString('event.name'),
@@ -168,8 +179,136 @@ void main() {
       result: ExportResult.failure,
     );
 
-    expect(await drain(source, exporter).drain(), 0);
+    final NativeCrashDrain subject = drain(source, exporter);
+    // Handed off, not delivered: the count is of reports taken on, and the
+    // acknowledgement is what a refusal withholds.
+    expect(await subject.drain(), 1);
+    await subject.settled();
     expect(source.acknowledged, isEmpty);
+  });
+
+  test('an exporter that never answers does not hold drain up', () async {
+    final _FakeSource source = _FakeSource(<NativeCrashReport>[_report()]);
+    final _RecordingExporter exporter = _RecordingExporter()
+      ..hold = Completer<void>().future;
+
+    expect(
+      await drain(source, exporter).drain().timeout(const Duration(seconds: 1)),
+      1,
+    );
+    // Nowhere durable to put it, so it is not acknowledged before it is
+    // accepted.
+    expect(source.acknowledged, isEmpty);
+  });
+
+  test('a report is acknowledged once the plain exporter accepts it', () async {
+    final _FakeSource source = _FakeSource(<NativeCrashReport>[_report()]);
+    final Completer<void> gate = Completer<void>();
+    final _RecordingExporter exporter = _RecordingExporter()
+      ..hold = gate.future;
+    final NativeCrashDrain subject = drain(source, exporter);
+
+    await subject.drain();
+    expect(source.acknowledged, isEmpty);
+
+    gate.complete();
+    await subject.settled();
+    expect(source.acknowledged, <List<String>>[
+      <String>['a'],
+    ]);
+  });
+
+  group('with a spool', () {
+    late Directory directory;
+
+    setUp(() async {
+      directory = await Directory.systemTemp.createTemp('otel_zone_native');
+    });
+
+    tearDown(() => directory.delete(recursive: true));
+
+    test(
+      'a never-answering delegate holds neither drain nor the ack',
+      () async {
+        final _RecordingExporter delegate = _RecordingExporter()
+          ..hold = Completer<void>().future;
+        final SpoolingLogRecordExporter spool = SpoolingLogRecordExporter(
+          delegate: delegate,
+          directory: directory,
+          maxAge: null,
+        );
+        final _FakeSource source = _FakeSource(<NativeCrashReport>[
+          _report(id: 'a'),
+          _report(id: 'b'),
+        ]);
+
+        final int count = await drain(
+          source,
+          spool,
+        ).drain().timeout(const Duration(seconds: 1));
+
+        expect(count, 2);
+        // Durable, so acknowledged: the platform's copy is no longer needed.
+        expect(source.acknowledged, <List<String>>[
+          <String>['a', 'b'],
+        ]);
+        expect(directory.listSync().whereType<File>(), hasLength(1));
+      },
+    );
+
+    test(
+      'a delegate that refuses still leaves the report acknowledged',
+      () async {
+        final SpoolingLogRecordExporter spool = SpoolingLogRecordExporter(
+          delegate: _RecordingExporter(result: ExportResult.failure),
+          directory: directory,
+          maxAge: null,
+        );
+        final _FakeSource source = _FakeSource(<NativeCrashReport>[_report()]);
+
+        await drain(source, spool).drain();
+        await spool.settled();
+
+        expect(source.acknowledged, hasLength(1));
+        expect(directory.listSync().whereType<File>(), hasLength(1));
+      },
+    );
+
+    test('the spooled crash batch is marked to be evicted last', () async {
+      final SpoolingLogRecordExporter spool = SpoolingLogRecordExporter(
+        delegate: _RecordingExporter(result: ExportResult.failure),
+        directory: directory,
+        maxAge: null,
+      );
+
+      await drain(_FakeSource(<NativeCrashReport>[_report()]), spool).drain();
+      await spool.settled();
+
+      // The acknowledged report may be the only copy left, so the count cap
+      // must not evict it before ordinary telemetry.
+      expect(
+        directory.listSync().whereType<File>().single.path,
+        contains('-evict-'),
+      );
+    });
+
+    test(
+      'an acknowledged report is delivered once, and the file goes',
+      () async {
+        final _RecordingExporter delegate = _RecordingExporter();
+        final SpoolingLogRecordExporter spool = SpoolingLogRecordExporter(
+          delegate: delegate,
+          directory: directory,
+          maxAge: null,
+        );
+
+        await drain(_FakeSource(<NativeCrashReport>[_report()]), spool).drain();
+        await spool.settled();
+
+        expect(delegate.batches, hasLength(1));
+        expect(directory.listSync().whereType<File>(), isEmpty);
+      },
+    );
   });
 
   test(
@@ -188,7 +327,9 @@ void main() {
       );
       final _FakeSource source = _FakeSource(<NativeCrashReport>[_report()]);
 
-      expect(await drain(source, spool).drain(), 0);
+      final NativeCrashDrain subject = drain(source, spool);
+      expect(await subject.drain(), 1);
+      await subject.settled();
       expect(source.acknowledged, isEmpty);
     },
   );
@@ -209,8 +350,14 @@ void main() {
       ..acknowledgeThrows = true;
     final _RecordingExporter exporter = _RecordingExporter();
     final List<String> warnings = <String>[];
+    final NativeCrashDrain subject = drain(
+      source,
+      exporter,
+      warnings: warnings,
+    );
 
-    expect(await drain(source, exporter, warnings: warnings).drain(), 1);
+    expect(await subject.drain(), 1);
+    await subject.settled();
     expect(exporter.batches, hasLength(1));
     expect(warnings, hasLength(1));
     expect(warnings.single, contains('not acknowledged'));
@@ -277,15 +424,14 @@ void main() {
       ]);
       final _RecordingExporter exporter = _RecordingExporter();
 
-      expect(
-        await drain(
-          source,
-          exporter,
-          redact: (String input) =>
-              input.contains('secret') ? throw StateError('bad rule') : input,
-        ).drain(),
-        1,
+      final NativeCrashDrain subject = drain(
+        source,
+        exporter,
+        redact: (String input) =>
+            input.contains('secret') ? throw StateError('bad rule') : input,
       );
+      expect(await subject.drain(), 1);
+      await subject.settled();
       expect(exporter.batches.single, hasLength(1));
       // Acknowledging the dropped report would mark its OS record delivered
       // and lose the crash, which is worse than losing the export.

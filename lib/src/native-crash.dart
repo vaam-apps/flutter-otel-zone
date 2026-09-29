@@ -1,9 +1,10 @@
 import 'package:dartastic_opentelemetry/dartastic_opentelemetry.dart';
 import 'package:fixnum/fixnum.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 
 import 'config.dart';
 import 'native-crash.g.dart';
+import 'spool.dart';
 
 /// The previous run's native deaths, as the platform reports them.
 ///
@@ -34,8 +35,13 @@ class PigeonNativeCrashSource implements NativeCrashSource {
   Future<void> acknowledge(List<String> ids) => _api.acknowledge(ids);
 }
 
-/// Turns the previous run's native deaths into FATAL log records, exports
-/// them, and acknowledges each report only once it is durable.
+/// Turns the previous run's native deaths into FATAL log records, makes them
+/// durable, and acknowledges each report only once they are.
+///
+/// Durable is the bar, not delivered: waiting for the collector would put the
+/// network on the boot path, and `OtelZone.start` is awaited before `runApp`.
+/// The report is written to the spool, acknowledged, and left to the spool to
+/// deliver.
 ///
 /// A crash report does **not** travel through the `Talker` bridge: a record of
 /// the process dying is not a breadcrumb, and it must not be gated by the
@@ -61,6 +67,12 @@ class NativeCrashDrain {
 
   /// Where the records go. The spooling exporter when one is configured, so a
   /// crash recovered offline is durable before it is acknowledged.
+  ///
+  /// Any other exporter has nowhere durable to put a report, so the report is
+  /// acknowledged only after that exporter has accepted it. That still
+  /// happens off the caller's path: the export is started and not awaited,
+  /// and a report that is never accepted stays with the OS to be read again
+  /// on the next launch.
   final LogRecordExporter exporter;
 
   /// The instrumentation scope the records carry.
@@ -84,11 +96,37 @@ class NativeCrashDrain {
   /// The OTel event name for an ANR.
   static const String eventAnr = 'device.anr';
 
-  /// Drains once and returns how many reports were made durable.
+  /// Deliveries still running after [drain] returned, so a test can wait.
+  final Set<Future<void>> _background = <Future<void>>{};
+
+  /// Completes when every export [drain] left running has finished.
+  @visibleForTesting
+  Future<void> settled() => Future.wait(_background.toList());
+
+  /// Drains once and returns how many reports it took responsibility for.
   ///
-  /// A report is acknowledged only after [exporter] has accepted it, so a
-  /// failed export leaves the OS record to be read again on the next launch.
-  /// Nothing here throws.
+  /// Only local work is awaited: reading the platform's reports, writing the
+  /// spool file, and acknowledging. With a spool, the report is acknowledged
+  /// as soon as it is on disk and the spool delivers it in its own time.
+  ///
+  /// That moves the point of no return: the platform's copy is released
+  /// before the collector has the report, so the spool's own limits apply to
+  /// it from then on, and the file may be the only copy. Those limits are
+  /// narrow on purpose. Being offline never counts against the file, so it is
+  /// dropped after `spoolMaxAttempts` failures only when the collector is
+  /// demonstrably accepting other batches and still refusing this one, with
+  /// one warning. The bounds that remain are `spoolMaxAge`, which is
+  /// unconditional, and `spoolMaxBatches`, which evicts every ordinary batch
+  /// before it touches one marked here as a crash report.
+  ///
+  /// Without a spool, or when it cannot be written, the export is started
+  /// without being awaited and the acknowledgement follows only if the
+  /// collector accepts it, so the platform's copy stays the durable one. In
+  /// that case the count is of reports handed off, not of reports the
+  /// collector has taken, and a report whose export fails is counted again on
+  /// the launch that re-reads it.
+  ///
+  /// Nothing here throws, and nothing here waits on the network.
   Future<int> drain() async {
     // The plugin is not registered on web, so asking would only produce a
     // MissingPluginException on every launch.
@@ -110,19 +148,39 @@ class NativeCrashDrain {
     }
     if (records.isEmpty) return 0;
 
-    if (await _export(records) != ExportResult.success) return 0;
-
-    try {
-      await source.acknowledge(delivered);
-    } on Object catch (error) {
-      // The records are durable but the platform does not know it, so they
-      // will be read again and re-exported. A duplicate is better than a
-      // loss, and this is the one place that trade is made.
-      onWarning(
-        'Native crash reports were exported but not acknowledged: $error',
-      );
+    final LogRecordExporter target = exporter;
+    if (target is SpoolingLogRecordExporter &&
+        await target.enqueue(records, evictLast: true)) {
+      await _acknowledge(delivered);
+      return records.length;
     }
+
+    late final Future<void> export;
+    export = _exportThenAcknowledge(
+      records,
+      delivered,
+    ).whenComplete(() => _background.remove(export));
+    _background.add(export);
     return records.length;
+  }
+
+  Future<void> _exportThenAcknowledge(
+    List<ReadableLogRecord> records,
+    List<String> ids,
+  ) async {
+    if (await _export(records) != ExportResult.success) return;
+    await _acknowledge(ids);
+  }
+
+  Future<void> _acknowledge(List<String> ids) async {
+    try {
+      await source.acknowledge(ids);
+    } on Object catch (error) {
+      // The records are safe but the platform does not know it, so they will
+      // be read again and exported again. A duplicate is better than a loss,
+      // and this is the one place that trade is made.
+      onWarning('Native crash reports were kept but not acknowledged: $error');
+    }
   }
 
   Future<List<NativeCrashReport>?> _pending() async {
