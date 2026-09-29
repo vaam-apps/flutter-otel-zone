@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:dartastic_opentelemetry/dartastic_opentelemetry.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otel_zone/otel_zone.dart';
 
@@ -98,6 +99,7 @@ void main() {
     List<String>? warnings,
     Redactor? redact,
     bool? isWeb,
+    TargetPlatform? platform,
   }) {
     return NativeCrashDrain(
       source: source,
@@ -105,6 +107,7 @@ void main() {
       loggerName: 'test-app',
       redact: redact,
       isWeb: isWeb,
+      platform: platform,
       onWarning: (String message) => warnings?.add(message),
     );
   }
@@ -370,6 +373,61 @@ void main() {
     expect(await drain(source, exporter, isWeb: true).drain(), 0);
     expect(source.pendingCalls, 0);
     expect(exporter.batches, isEmpty);
+  });
+
+  for (final TargetPlatform platform in <TargetPlatform>[
+    TargetPlatform.macOS,
+    TargetPlatform.linux,
+    TargetPlatform.windows,
+    TargetPlatform.fuchsia,
+  ]) {
+    test('on ${platform.name} the platform is never asked and nothing is '
+        'warned', () async {
+      final _FakeSource source = _FakeSource(<NativeCrashReport>[_report()]);
+      final _RecordingExporter exporter = _RecordingExporter();
+      final List<String> warnings = <String>[];
+
+      final NativeCrashDrain subject = drain(
+        source,
+        exporter,
+        warnings: warnings,
+        platform: platform,
+      );
+
+      expect(await subject.drain(), 0);
+      expect(source.pendingCalls, 0);
+      expect(exporter.batches, isEmpty);
+      expect(warnings, isEmpty);
+    });
+  }
+
+  for (final TargetPlatform platform in <TargetPlatform>[
+    TargetPlatform.android,
+    TargetPlatform.iOS,
+  ]) {
+    test('on ${platform.name} the platform is read', () async {
+      final _FakeSource source = _FakeSource(<NativeCrashReport>[_report()]);
+      final _RecordingExporter exporter = _RecordingExporter();
+
+      final NativeCrashDrain subject = drain(
+        source,
+        exporter,
+        platform: platform,
+      );
+
+      expect(await subject.drain(), 1);
+      await subject.settled();
+      expect(source.pendingCalls, 1);
+    });
+  }
+
+  test('the default platform is defaultTargetPlatform', () async {
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    final _FakeSource source = _FakeSource(<NativeCrashReport>[_report()]);
+
+    expect(await drain(source, _RecordingExporter()).drain(), 0);
+    expect(source.pendingCalls, 0);
   });
 
   test('the redactor scrubs the record it produces', () async {

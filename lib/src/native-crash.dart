@@ -1,6 +1,7 @@
 import 'package:dartastic_opentelemetry/dartastic_opentelemetry.dart';
 import 'package:fixnum/fixnum.dart';
-import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb, visibleForTesting;
 
 import 'config.dart';
 import 'native-crash.g.dart';
@@ -51,8 +52,10 @@ class NativeCrashDrain {
   /// [onWarning].
   ///
   /// [loggerName] is the instrumentation scope the records are emitted under.
-  /// [isWeb] exists so the web no-op can be tested off the web; it defaults to
-  /// the real platform flag.
+  /// The drain reads the platform only on Android and iOS, the two platforms
+  /// the plugin registers. [isWeb] and [platform] exist so the no-op on every
+  /// other platform can be tested off it; they default to the real platform
+  /// flag and to `defaultTargetPlatform`.
   NativeCrashDrain({
     required this.source,
     required this.exporter,
@@ -60,7 +63,10 @@ class NativeCrashDrain {
     required this.onWarning,
     this.redact,
     bool? isWeb,
-  }) : _isWeb = isWeb ?? kIsWeb;
+    TargetPlatform? platform,
+  }) : _supported =
+           !(isWeb ?? kIsWeb) &&
+           _nativePlatforms.contains(platform ?? defaultTargetPlatform);
 
   /// Where the reports come from.
   final NativeCrashSource source;
@@ -88,7 +94,13 @@ class NativeCrashDrain {
   /// [Redactor] as every other exported string.
   final Redactor? redact;
 
-  final bool _isWeb;
+  /// The platforms the plugin registers a crash source on.
+  static const Set<TargetPlatform> _nativePlatforms = <TargetPlatform>{
+    TargetPlatform.android,
+    TargetPlatform.iOS,
+  };
+
+  final bool _supported;
 
   /// The OTel event name for a crash.
   static const String eventCrash = 'device.crash';
@@ -128,9 +140,10 @@ class NativeCrashDrain {
   ///
   /// Nothing here throws, and nothing here waits on the network.
   Future<int> drain() async {
-    // The plugin is not registered on web, so asking would only produce a
-    // MissingPluginException on every launch.
-    if (_isWeb) return 0;
+    // The plugin is registered on Android and iOS only, so on web or desktop
+    // asking would only produce a missing-plugin or channel-error warning,
+    // exported, on every launch.
+    if (!_supported) return 0;
 
     final List<NativeCrashReport>? reports = await _pending();
     if (reports == null || reports.isEmpty) return 0;
