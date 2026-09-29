@@ -382,6 +382,66 @@ class ExitInfoSourceTest {
     }
 
     @Test
+    fun `the crashed run's version and build are on its exit record`() {
+        val device = Device(
+            listOf(
+                record(
+                    now - 5_000,
+                    ApplicationExitInfo.REASON_CRASH_NATIVE,
+                    status = 11,
+                    summary = RunSession.encode("sess-1", AppBuild.of("1.0.0", 1)),
+                ),
+                record(
+                    now - 4_000,
+                    ApplicationExitInfo.REASON_ANR,
+                    pid = 101,
+                    summary = RunSession.encode("sess-2", AppBuild.of("1.0.1", 2)),
+                ),
+            ),
+        )
+
+        val (native, anr) = launch(device).pending().map { it.report }
+
+        assertEquals("1.0.0", native.attributes?.get("otel_zone.crashed.service.version"))
+        assertEquals("1", native.attributes?.get("otel_zone.crashed.app.build_id"))
+        assertEquals("1.0.1", anr.attributes?.get("otel_zone.crashed.service.version"))
+        assertEquals("2", anr.attributes?.get("otel_zone.crashed.app.build_id"))
+        assertEquals("sess-1", native.sessionId)
+    }
+
+    @Test
+    fun `an exit record from before the build was recorded has no build attributes, not the current one`() {
+        val device = Device(
+            listOf(
+                // The previous release's summary: the bare session id.
+                record(
+                    now - 5_000,
+                    ApplicationExitInfo.REASON_CRASH_NATIVE,
+                    status = 11,
+                    summary = "6f1c2a3e-1111-4222-8333-444455556666".toByteArray(),
+                ),
+                record(now - 4_000, ApplicationExitInfo.REASON_ANR, pid = 101, summary = null),
+                record(
+                    now - 3_000,
+                    ApplicationExitInfo.REASON_ANR,
+                    pid = 102,
+                    summary = "not a session!".toByteArray(),
+                ),
+            ),
+        )
+
+        val reports = launch(device).pending().map { it.report }
+
+        assertEquals(3, reports.size)
+        for (report in reports) {
+            val attributes = report.attributes.orEmpty()
+            assertFalse(attributes.containsKey("otel_zone.crashed.service.version"), "$report")
+            assertFalse(attributes.containsKey("otel_zone.crashed.app.build_id"), "$report")
+        }
+        assertEquals("6f1c2a3e-1111-4222-8333-444455556666", reports.first().sessionId)
+    }
+
+    @Test
     fun `a sigkill says whether the OS can tell a low-memory kill apart`() {
         val kill = record(now - 5_000, ApplicationExitInfo.REASON_SIGNALED, status = 9)
 

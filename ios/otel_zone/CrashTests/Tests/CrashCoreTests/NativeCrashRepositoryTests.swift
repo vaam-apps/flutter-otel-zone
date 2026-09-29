@@ -66,6 +66,40 @@ final class NativeCrashRepositoryTests: XCTestCase {
 
   // MARK: - Merge
 
+  func testAMergedRecordCarriesTheBuildTheExceptionReportRecorded() throws {
+    persist("crash-abort")
+    // The fixture's MetricKit crash says 1.4.0 (42); the crashing process
+    // said 1.3.9 (41). The process wrote its own, so its word stands.
+    harness.writeException(
+      reason: "x", build: AppBuild(version: "1.3.9", build: "41"), at: ten)
+
+    let report = try XCTUnwrap(harness.repository.pending().first)
+
+    XCTAssertEqual(report.kind, "nsexception")
+    XCTAssertEqual(report.attributes?["otel_zone.crashed.service.version"], "1.3.9")
+    XCTAssertEqual(report.attributes?["otel_zone.crashed.app.build_id"], "41")
+  }
+
+  func testAMergedRecordKeepsMetricKitsBuildWhenTheExceptionReportPredatesIt() throws {
+    persist("crash-abort")
+    harness.writeException(reason: "x", at: ten)
+
+    let report = try XCTUnwrap(harness.repository.pending().first)
+
+    XCTAssertEqual(report.attributes?["otel_zone.crashed.service.version"], "1.4.0")
+    XCTAssertEqual(report.attributes?["otel_zone.crashed.app.build_id"], "42")
+  }
+
+  func testAnExceptionReportAloneCarriesItsBuildThroughTheRepository() throws {
+    harness.writeException(
+      reason: "x", build: AppBuild(version: "2.0.0", build: "7"), at: ten)
+
+    let report = try XCTUnwrap(harness.repository.pending().first)
+
+    XCTAssertEqual(report.attributes?["otel_zone.crashed.service.version"], "2.0.0")
+    XCTAssertEqual(report.attributes?["otel_zone.crashed.app.build_id"], "7")
+  }
+
   func testAnExceptionAndItsMetricKitCrashAreOneRecord() throws {
     persist("crash-abort")
     harness.writeException(

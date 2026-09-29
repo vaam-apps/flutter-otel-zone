@@ -52,7 +52,15 @@ internal class CrashStore(
     private val pid: () -> Int = android.os.Process::myPid,
     /** The run this store is writing in; see [RunSession]. */
     private val sessionId: String? = null,
+    /**
+     * The build this process is running, read at start-up. Held here so the
+     * handler never asks the package manager while the process is dying; see
+     * [AppBuild].
+     */
+    build: AppBuild = AppBuild.UNKNOWN,
 ) : JvmCrashRecorder {
+
+    private val buildAttributes: Map<String, String> = build.attributes()
 
     private val sequence = AtomicLong(0)
 
@@ -73,7 +81,10 @@ internal class CrashStore(
                 "attributes",
                 JSONObject()
                     .put("thread.name", thread.name)
-                    .put("process.pid", pid().toString()),
+                    .put("process.pid", pid().toString())
+                    .also { attributes ->
+                        buildAttributes.forEach { (key, value) -> attributes.put(key, value) }
+                    },
             )
 
         val target = File(directory, "$id$SUFFIX")

@@ -306,6 +306,53 @@ The Flutter-free half of the iOS code is unit-tested with `swift test` from
 documented JSON. On both platforms `NativeCrashSource` is the seam the drain is
 tested through.
 
+### Which build crashed
+
+A crash is reported by the **next** launch, and the record leaves under *that*
+launch's resource. After an app update `service.version` and `app.build_id`
+therefore name the build that reported the crash, not the one that died, and
+symbols get fetched for the wrong binary. So every native crash record carries
+two attributes of its own:
+
+| Attribute                          | Android            | iOS                          |
+| ---------------------------------- | ------------------ | ---------------------------- |
+| `otel_zone.crashed.service.version` | `versionName`      | `CFBundleShortVersionString` |
+| `otel_zone.crashed.app.build_id`    | `longVersionCode`  | `CFBundleVersion`            |
+
+They are the same two names on both platforms, and they describe the build that
+was **running when it died**, whichever build reports it: a crash from 1.0.0+1
+recovered by 1.0.1+2 has `otel_zone.crashed.service.version=1.0.0` and
+`otel_zone.crashed.app.build_id=1`, under a resource that says `1.0.1` and `2`.
+(OTel resources are per batch, so the record cannot be re-resourced; that is why
+this is an attribute.)
+
+Each is present only when it is known and **omitted otherwise, never guessed**.
+In particular a report written before this existed has neither, and a reader
+must treat "absent" as "unknown", not as "the current build".
+
+- **Android JVM crashes** read `versionName` and `longVersionCode` once at
+  start-up and hold them in memory; the handler writes them into the report
+  without asking the package manager while the process is dying.
+- **Android exit records** (native crashes, ANRs, signals) get them from the
+  crashed process's own `setProcessStateSummary`, which now carries the version
+  and build next to the session id. The OS keeps 128 bytes there, so the summary
+  is a compact length-prefixed format that starts with a marker byte
+  (`0x01 | len | session id | len | version | len | build`); the version is
+  dropped, then the build, rather than truncated when they do not fit, and a
+  summary from an earlier release (the bare session id) decodes to a session
+  with no version and no build.
+- **iOS `NSException` reports** get `CFBundleShortVersionString` and
+  `CFBundleVersion` from the handler, read when it is installed. **MetricKit**
+  diagnostics already carry `appVersion` and `appBuildVersion`; they are mapped
+  to these same two attributes. The old `metrickit.app_version` and
+  `metrickit.app_build_version` copies are gone: one fact under two names is how
+  the two drift apart, and no consumer needed the platform-specific one. When an
+  `NSException` report and a MetricKit diagnostic merge into one record, the
+  exception report's build wins, because the crashing process wrote it itself.
+
+`redact` is applied to these attributes like any other, so a redactor that
+rewrites version-shaped strings would change them; leave them out of its rules.
+
 ### Crash harness
 
 Native capture is the OS's behaviour, not ours, so it is proven by dying on
@@ -356,6 +403,25 @@ dart run tool/android-crash-harness.dart --device emulator-5554 --release-refusa
 cd example && flutter test integration_test -d emulator-5554   # channel is present, refuses an unknown kind
 ```
 
+Each recovered record must also carry the crashed-build attributes.
+`--upgrade-apk <apk>` adds the case they exist for: after the crash, a second
+build is installed **over** the first without clearing its data, and the record
+must then name the old build in `otel_zone.crashed.*` and the new one in its
+resource. The example reads its `service.version` and `build_id` from
+`--dart-define=APP_VERSION` and `APP_BUILD` (standing in for `package_info_plus`),
+so the two builds are told apart:
+
+```bash
+cd example
+flutter build apk --debug --build-name 1.0.1 --build-number 2 \
+  --dart-define=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4421 \
+  --dart-define=APP_VERSION=1.0.1 --dart-define=APP_BUILD=2
+cp build/app/outputs/flutter-apk/app-debug.apk /tmp/app-1.0.1-2.apk
+flutter build apk --debug --dart-define=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4421
+cd .. && dart run tool/android-crash-harness.dart --no-build --kinds jvm,native \
+  --upgrade-apk /tmp/app-1.0.1-2.apk
+```
+
 `--kinds jvm,native` narrows it; `--retries` (default 1) re-runs a failed kind
 from a fresh install. The receiver (`tool/otlp-log-sink.dart`) decodes OTLP by
 hand and is unit-tested against the SDK's own encoder.
@@ -382,6 +448,10 @@ without MetricKit.
 cd example && flutter pub get && flutter create --platforms=ios . && cd ..
 dart run tool/ios-crash-harness.dart --device <booted simulator udid>
 ```
+
+It checks the crashed-build attributes too, and `--app <Runner.app>` with
+`--upgrade-app <Runner.app>` runs the same update-over-a-crash case as Android
+(`simctl install` over an installed app keeps its data).
 
 **Manual device verification** (not run in CI; a real-device farm is out of
 scope):

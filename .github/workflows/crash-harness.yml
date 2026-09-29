@@ -90,6 +90,18 @@ jobs:
         working-directory: example
         run: flutter create --platforms=android .
 
+      # The build the crashed one is updated to, for the upgrade check below:
+      # its own version and build, so a record recovered by it can be told to
+      # name the older build that died. Built first because every build lands
+      # at the same path; the default build after it is the one the rest use.
+      - name: Build the upgrade target (debug, 1.0.1+2)
+        working-directory: example
+        run: |
+          flutter build apk --debug --build-name 1.0.1 --build-number 2 \
+            --dart-define=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:${{ env.OTEL_PORT }} \
+            --dart-define=APP_VERSION=1.0.1 --dart-define=APP_BUILD=2
+          cp build/app/outputs/flutter-apk/app-debug.apk "$RUNNER_TEMP/app-1.0.1-2.apk"
+
       # Built before the emulator starts, so the emulator is not idle through
       # a Gradle build.
       - name: Build the example (debug)
@@ -115,5 +127,6 @@ jobs:
           disable-animations: true
           script: |
             dart run tool/android-crash-harness.dart --no-build --kinds jvm,native,anr --port ${{ env.OTEL_PORT }}
+            dart run tool/android-crash-harness.dart --no-build --kinds jvm,native --upgrade-apk ${{ runner.temp }}/app-1.0.1-2.apk --port ${{ env.OTEL_PORT }}
             dart run tool/android-crash-harness.dart --no-build --release-refusal --port ${{ env.OTEL_PORT }}
             cd example && flutter test integration_test -d emulator-5554

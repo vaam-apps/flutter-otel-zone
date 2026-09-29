@@ -22,6 +22,10 @@ enum NSExceptionSource {
   /// capture anything, so it lives here, and it is written once, before the
   /// handler is installed and never after.
   private static var store: CrashFileStore?
+  /// Read at install time, like everything else the handler needs: the build
+  /// that is running is the one that crashes, and the handler must not go and
+  /// look it up while the process is aborting.
+  private static var appBuild = AppBuild.unknown
   private static var previous: NSUncaughtExceptionHandler?
   private static var installed = false
   private static let installLock = NSLock()
@@ -32,7 +36,7 @@ enum NSExceptionSource {
   /// install would chain the handler to itself and write every report twice.
   /// Never throws — a store that cannot be prepared means no reports, and the
   /// app carries on exactly as it would without this package.
-  static func install(store: CrashFileStore) {
+  static func install(store: CrashFileStore, appBuild: AppBuild = .read()) {
     installLock.lock()
     defer { installLock.unlock() }
     guard !installed else { return }
@@ -43,6 +47,7 @@ enum NSExceptionSource {
     store.sweepTemps()
 
     self.store = store
+    self.appBuild = appBuild
     self.previous = NSGetUncaughtExceptionHandler()
     installed = true
     NSSetUncaughtExceptionHandler { exception in
@@ -62,6 +67,7 @@ enum NSExceptionSource {
     guard installed else { return }
     NSSetUncaughtExceptionHandler(nil)
     store = nil
+    appBuild = .unknown
     previous = nil
     installed = false
   }
@@ -74,7 +80,7 @@ enum NSExceptionSource {
     // would have — a changed crash UX is worse than a lost report.
     if let store {
       do {
-        try store.write(encode(exception))
+        try store.write(encode(exception, build: appBuild))
       } catch {
         // Nowhere to report a failure to: the process is aborting.
       }
@@ -82,14 +88,20 @@ enum NSExceptionSource {
     previous?(exception)
   }
 
-  static func encode(_ exception: NSException, now: Date = Date()) throws -> Data {
+  static func encode(
+    _ exception: NSException, now: Date = Date(), build: AppBuild = .unknown
+  ) throws -> Data {
     let symbols = exception.callStackSymbols.prefix(maxSymbols)
-    let object: [String: Any] = [
+    var object: [String: Any] = [
       "name": exception.name.rawValue,
       "reason": String((exception.reason ?? "").prefix(maxReasonLength)),
       "callStackSymbols": Array(symbols),
       "timestampMicros": Int64(now.timeIntervalSince1970 * 1_000_000),
     ]
+    // Only what is known: a key that is absent means "not recorded", which is
+    // also what a report from before this was written means.
+    if let version = build.version { object["appVersion"] = version }
+    if let number = build.build { object["appBuild"] = number }
     return try JSONSerialization.data(withJSONObject: object)
   }
 }
@@ -101,6 +113,9 @@ struct NSExceptionReport: Equatable {
   var reason: String?
   var symbols: [String]
   var timestampMicros: Int64
+  /// The build that threw, as the handler read it at install time. `nil` for
+  /// a report written before it was recorded, which must stay unknown.
+  var appBuild = AppBuild.unknown
 
   /// The report in [data], or `nil` when this build cannot read it.
   static func decode(id: String, data: Data) -> NSExceptionReport? {
@@ -114,7 +129,9 @@ struct NSExceptionReport: Equatable {
       name: name,
       reason: json["reason"] as? String,
       symbols: (json["callStackSymbols"] as? [Any])?.compactMap { $0 as? String } ?? [],
-      timestampMicros: timestamp)
+      timestampMicros: timestamp,
+      appBuild: AppBuild(
+        version: AppBuild.clean(json["appVersion"]), build: AppBuild.clean(json["appBuild"])))
   }
 
   var record: CrashRecord {
@@ -127,6 +144,8 @@ struct NSExceptionReport: Equatable {
       stacktrace: symbols.isEmpty ? nil : symbols.joined(separator: "\n"),
       threads: nil,
       sessionId: nil,
-      attributes: ["crash.source": "nsexception"])
+      attributes: ["crash.source": "nsexception"].merging(appBuild.attributes) { current, _ in
+        current
+      })
   }
 }

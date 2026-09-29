@@ -25,10 +25,65 @@ final class MetricKitPayloadMapperTests: XCTestCase {
     XCTAssertEqual(record.attributes?["crash.exception_code"], "1")
     XCTAssertEqual(record.attributes?["crash.termination_reason"], "Namespace SIGNAL, Code 0xb")
     XCTAssertEqual(record.attributes?["crash.vm_region_info"], "0 is not in any region.")
-    XCTAssertEqual(record.attributes?["metrickit.app_version"], "1.4.0")
+    XCTAssertEqual(record.attributes?["otel_zone.crashed.service.version"], "1.4.0")
+    XCTAssertEqual(record.attributes?["otel_zone.crashed.app.build_id"], "42")
     XCTAssertEqual(record.attributes?["metrickit.device_type"], "iPhone15,2")
     // The timestamp is the end of the payload's window: a crash has none.
     XCTAssertEqual(record.timestampMicros, 1_790_591_400_000_000)
+  }
+
+  func testTheCrashedBuildIsOnEveryDiagnosticUnderTheSharedNames() throws {
+    for name in ["crash-sigsegv", "crash-abort", "crash-nsexception-ios17", "hang"] {
+      let record = try XCTUnwrap(map(name).first).record
+      XCTAssertEqual(record.attributes?["otel_zone.crashed.service.version"], "1.4.0", name)
+      XCTAssertEqual(record.attributes?["otel_zone.crashed.app.build_id"], "42", name)
+    }
+  }
+
+  func testTheMetricKitSpecificCopiesOfTheBuildAreGone() throws {
+    let attributes = try XCTUnwrap(map("crash-sigsegv").first).record.attributes ?? [:]
+
+    XCTAssertNil(attributes["metrickit.app_version"])
+    XCTAssertNil(attributes["metrickit.app_build_version"])
+    // Nor did the unknown-key sweep pick them up under another name.
+    XCTAssertNil(attributes["metrickit.meta.appVersion"])
+    XCTAssertNil(attributes["metrickit.meta.appBuildVersion"])
+  }
+
+  func testADiagnosticWithNoBuildFieldsOrBlankOnesHasNoBuildAttributes() throws {
+    func mapped(editing edit: (inout [String: Any]) -> Void) throws -> [String: String] {
+      var root = try XCTUnwrap(
+        JSONSerialization.jsonObject(with: fixture("crash-sigsegv")) as? [String: Any])
+      var crashes = try XCTUnwrap(root["crashDiagnostics"] as? [[String: Any]])
+      var meta = try XCTUnwrap(crashes[0]["diagnosticMetaData"] as? [String: Any])
+      edit(&meta)
+      crashes[0]["diagnosticMetaData"] = meta
+      root["crashDiagnostics"] = crashes
+      let data = try JSONSerialization.data(withJSONObject: root)
+      return try XCTUnwrap(
+        MetricKitPayloadMapper.map(
+          data: data, fileId: "mx-0000001790600000000-0000", receivedAt: received
+        )
+        .first
+      ).record.attributes ?? [:]
+    }
+
+    let absent = try mapped { meta in
+      meta.removeValue(forKey: "appVersion")
+      meta.removeValue(forKey: "appBuildVersion")
+    }
+    let blank = try mapped { meta in
+      meta["appVersion"] = "  "
+      meta["appBuildVersion"] = ""
+    }
+    let oneHalf = try mapped { meta in meta.removeValue(forKey: "appBuildVersion") }
+
+    for attributes in [absent, blank] {
+      XCTAssertNil(attributes["otel_zone.crashed.service.version"])
+      XCTAssertNil(attributes["otel_zone.crashed.app.build_id"])
+    }
+    XCTAssertEqual(oneHalf["otel_zone.crashed.service.version"], "1.4.0")
+    XCTAssertNil(oneHalf["otel_zone.crashed.app.build_id"])
   }
 
   func testCrashingThreadFramesAreInnermostFirstWithBinaryUUIDAndOffset() throws {

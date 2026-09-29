@@ -24,7 +24,13 @@ class CrashReportsTest {
         override fun historical(): List<ExitRecord> = records
     }
 
-    private fun exit(timestamp: Long, reason: Int, pid: Int, summary: String? = null) =
+    private fun exit(
+        timestamp: Long,
+        reason: Int,
+        pid: Int,
+        summary: String? = null,
+        build: AppBuild = AppBuild.UNKNOWN,
+    ) =
         ExitRecord(
             pid = pid,
             processName = "com.example.app",
@@ -33,14 +39,18 @@ class CrashReportsTest {
             status = 0,
             importance = 100,
             description = "java.lang.RuntimeException: boom",
-            processStateSummary = summary?.let(RunSession::encode),
+            processStateSummary = summary?.let { RunSession.encode(it, build) },
             pssKb = 0,
             rssKb = 0,
             openTrace = { null },
         )
 
-    private fun store(pid: Int, at: Long, session: String? = null) =
-        CrashStore(crashes, nowMillis = { at }, pid = { pid }, sessionId = session)
+    private fun store(
+        pid: Int,
+        at: Long,
+        session: String? = null,
+        build: AppBuild = AppBuild.UNKNOWN,
+    ) = CrashStore(crashes, nowMillis = { at }, pid = { pid }, sessionId = session, build = build)
 
     private fun reports(device: ExitRecords, sdkInt: Int = 34) =
         CrashReports(
@@ -48,8 +58,14 @@ class CrashReportsTest {
             exitInfo = ExitInfoSource(device, root, sdkInt, nowMillis = { now }),
         )
 
-    private fun jvmCrash(pid: Int, at: Long, message: String = "boom", session: String? = null) {
-        store(pid, at, session).record(Thread.currentThread(), RuntimeException(message))
+    private fun jvmCrash(
+        pid: Int,
+        at: Long,
+        message: String = "boom",
+        session: String? = null,
+        build: AppBuild = AppBuild.UNKNOWN,
+    ) {
+        store(pid, at, session, build).record(Thread.currentThread(), RuntimeException(message))
     }
 
     @Test
@@ -83,6 +99,29 @@ class CrashReportsTest {
         assertEquals(Thread.currentThread().name, report.attributes?.get("thread.name"))
         // The moment the exception was thrown, not the moment the OS noticed.
         assertEquals((now - 5_000) * 1000, report.timestampMicros)
+    }
+
+    @Test
+    fun `a joined record carries the build that crashed, from either half`() {
+        val old = AppBuild.of("1.0.0", 1)
+        jvmCrash(pid = 100, at = now - 5_000, session = "sess-1", build = old)
+        jvmCrash(pid = 200, at = now - 3_000, session = "sess-2", build = old)
+        val device = Device(
+            listOf(
+                // Its summary names the build too.
+                exit(now - 4_000, ApplicationExitInfo.REASON_CRASH, pid = 100, summary = "sess-1", build = old),
+                // Written by a run that predates the build in the summary: the
+                // JVM report still knows.
+                exit(now - 2_000, ApplicationExitInfo.REASON_CRASH, pid = 200, summary = "sess-2"),
+            ),
+        )
+
+        val (first, second) = reports(device).pending()
+
+        for (report in listOf(first, second)) {
+            assertEquals("1.0.0", report.attributes?.get("otel_zone.crashed.service.version"))
+            assertEquals("1", report.attributes?.get("otel_zone.crashed.app.build_id"))
+        }
     }
 
     @Test

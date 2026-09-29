@@ -116,4 +116,89 @@ final class NSExceptionSourceTests: XCTestCase {
     XCTAssertEqual(reports.first?.message, "x")
     XCTAssertEqual(reports.first?.type, "NSRangeException")
   }
+
+  // MARK: - The build that crashed
+
+  private func onlyReport() throws -> NSExceptionReport {
+    try XCTUnwrap(
+      store.ids().first.flatMap { id in
+        store.read(id: id).flatMap { NSExceptionReport.decode(id: id, data: $0) }
+      })
+  }
+
+  func testTheHandlerWritesTheVersionAndBuildItWasInstalledWith() throws {
+    NSExceptionSource.install(
+      store: store, appBuild: AppBuild(version: "1.0.0", build: "1"))
+
+    try fire(NSException(name: .rangeException, reason: "x", userInfo: nil))
+
+    let record = try onlyReport().record
+    XCTAssertEqual(record.attributes?["otel_zone.crashed.service.version"], "1.0.0")
+    XCTAssertEqual(record.attributes?["otel_zone.crashed.app.build_id"], "1")
+    XCTAssertEqual(record.attributes?["crash.source"], "nsexception")
+  }
+
+  func testTheBuildIsFixedAtInstallTimeNotLookedUpWhenTheExceptionFires() throws {
+    NSExceptionSource.install(
+      store: store, appBuild: AppBuild(version: "1.0.0", build: "1"))
+    // Installing again is a no-op, so a later "current" build cannot leak in.
+    NSExceptionSource.install(
+      store: store, appBuild: AppBuild(version: "9.9.9", build: "99"))
+
+    try fire(NSException(name: .rangeException, reason: "x", userInfo: nil))
+
+    XCTAssertEqual(try onlyReport().appBuild, AppBuild(version: "1.0.0", build: "1"))
+  }
+
+  func testAnUnknownBuildWritesNoKeysAndYieldsNoAttributes() throws {
+    NSExceptionSource.install(store: store, appBuild: .unknown)
+
+    try fire(NSException(name: .rangeException, reason: "x", userInfo: nil))
+
+    let record = try onlyReport().record
+    XCTAssertNil(record.attributes?["otel_zone.crashed.service.version"])
+    XCTAssertNil(record.attributes?["otel_zone.crashed.app.build_id"])
+    let data = try NSExceptionSource.encode(
+      NSException(name: .rangeException, reason: "x", userInfo: nil))
+    let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    XCTAssertNil(json["appVersion"])
+    XCTAssertNil(json["appBuild"])
+  }
+
+  func testAReportWrittenBeforeTheBuildWasRecordedDecodesToUnknown() throws {
+    let legacy = Data(
+      #"{"name":"NSRangeException","reason":"x","callStackSymbols":[],"timestampMicros":1}"#.utf8)
+
+    let report = try XCTUnwrap(NSExceptionReport.decode(id: "ns-1", data: legacy))
+
+    XCTAssertEqual(report.appBuild, .unknown)
+    XCTAssertNil(report.record.attributes?["otel_zone.crashed.service.version"])
+    XCTAssertNil(report.record.attributes?["otel_zone.crashed.app.build_id"])
+  }
+
+  func testAMistypedOrBlankBuildInAReportIsUnknownNotBelieved() throws {
+    let odd = Data(
+      #"{"name":"N","timestampMicros":1,"appVersion":7,"appBuild":"  "}"#.utf8)
+
+    let report = try XCTUnwrap(NSExceptionReport.decode(id: "ns-1", data: odd))
+
+    XCTAssertEqual(report.appBuild, .unknown)
+  }
+
+  func testTheBuildIsReadFromTheBundleInfoPlist() throws {
+    let build = AppBuild.read(from: .main)
+
+    XCTAssertEqual(
+      build.version, Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
+    XCTAssertEqual(build.build, Bundle.main.infoDictionary?["CFBundleVersion"] as? String)
+  }
+
+  func testABundleWithNeitherKeyIsUnknown() throws {
+    let bundleDirectory = makeTempDirectory().appendingPathComponent("Empty.bundle")
+    try FileManager.default.createDirectory(
+      at: bundleDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: bundleDirectory.deletingLastPathComponent()) }
+
+    XCTAssertEqual(AppBuild.read(from: try XCTUnwrap(Bundle(url: bundleDirectory))), .unknown)
+  }
 }

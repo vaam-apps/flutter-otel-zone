@@ -18,7 +18,7 @@ class CrashStoreTest {
     /** Shorter than the production five minutes, so tests stay readable. */
     private val staleWindow = 60_000L
 
-    private fun store(maxReports: Int = 16): CrashStore =
+    private fun store(maxReports: Int = 16, build: AppBuild = AppBuild.UNKNOWN): CrashStore =
         CrashStore(
             directory = directory,
             maxReports = maxReports,
@@ -26,6 +26,7 @@ class CrashStoreTest {
             staleTempMillis = staleWindow,
             pid = { PID },
             sessionId = SESSION,
+            build = build,
         )
 
     @AfterTest
@@ -53,6 +54,37 @@ class CrashStoreTest {
         val report = store().pending().single()
         assertEquals(PID.toString(), report.attributes?.get("process.pid"))
         assertEquals(SESSION, report.sessionId)
+    }
+
+    @Test
+    fun `a report carries the version and build that were running when it was written`() {
+        store(build = AppBuild.of("1.0.0", 1)).record(Thread.currentThread(), RuntimeException("boom"))
+
+        val report = store().pending().single()
+
+        assertEquals("1.0.0", report.attributes?.get("otel_zone.crashed.service.version"))
+        assertEquals("1", report.attributes?.get("otel_zone.crashed.app.build_id"))
+    }
+
+    @Test
+    fun `a report is read back with the build it was written under, whatever build reads it`() {
+        store(build = AppBuild.of("1.0.0", 1)).record(Thread.currentThread(), RuntimeException("boom"))
+
+        // The next launch is a newer build; it reads the file, it does not rewrite it.
+        val report = store(build = AppBuild.of("1.0.1", 2)).pending().single()
+
+        assertEquals("1.0.0", report.attributes?.get("otel_zone.crashed.service.version"))
+        assertEquals("1", report.attributes?.get("otel_zone.crashed.app.build_id"))
+    }
+
+    @Test
+    fun `a report written with no known build has neither attribute`() {
+        store().record(Thread.currentThread(), RuntimeException("boom"))
+
+        val attributes = store().pending().single().attributes.orEmpty()
+
+        assertFalse(attributes.containsKey("otel_zone.crashed.service.version"))
+        assertFalse(attributes.containsKey("otel_zone.crashed.app.build_id"))
     }
 
     @Test

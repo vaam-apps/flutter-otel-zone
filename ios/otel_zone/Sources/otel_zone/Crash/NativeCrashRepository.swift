@@ -291,6 +291,11 @@ final class NativeCrashRepository {
     record.threads = threads.isEmpty ? nil : threads
     var attributes = record.attributes ?? [:]
     attributes["crash.source"] = "metrickit+nsexception"
+    // The exception report was written by the crashing process itself, from
+    // what it read at start-up, so where it knows the build it outranks the
+    // diagnostic's own field. Where it does not (a report from before it was
+    // recorded), MetricKit's stays.
+    attributes.merge(report.appBuild.attributes) { _, fromReport in fromReport }
     record.attributes = attributes
     return record
   }
