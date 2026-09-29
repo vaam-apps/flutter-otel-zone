@@ -147,7 +147,14 @@ void main() {
       unawaited(
         spool.export(<ReadableLogRecord>[_record(body: 'lost in a tunnel')]),
       );
-      await _until(() => _spoolFiles(directory).isNotEmpty);
+      // The renamed file, not merely a file: the write-ahead is a temp file and
+      // then a rename, and the next spool sweeps any temp it does not own. Taking
+      // the temp for the batch made this test lose the race on a slow disk.
+      await _until(
+        () => _spoolFiles(
+          directory,
+        ).any((File f) => f.path.endsWith('.spool.json')),
+      );
 
       final _FakeExporter revived = _FakeExporter()..failing = false;
       final SpoolingLogRecordExporter next = SpoolingLogRecordExporter(
