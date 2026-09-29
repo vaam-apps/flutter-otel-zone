@@ -170,6 +170,41 @@ class ExitInfoSourceTest {
     }
 
     @Test
+    fun `two records of one pid and reason are one death, whichever the session evidence allows`() {
+        val a = RunSession.encode("run-a")
+        val b = RunSession.encode("run-b")
+        fun crashes(first: ByteArray?, second: ByteArray?) = Device(
+            listOf(
+                record(now - 9_000, ApplicationExitInfo.REASON_CRASH, pid = 100, summary = first),
+                record(now - 3_000, ApplicationExitInfo.REASON_CRASH, pid = 100, summary = second),
+            ),
+        )
+
+        assertEquals(1, launch(crashes(a, a)).pending().size, "same run")
+        assertEquals(1, launch(crashes(null, a)).pending().size, "no evidence of another run")
+        assertEquals(1, launch(crashes(a, null)).pending().size, "no evidence of another run")
+        assertEquals(1, launch(crashes(null, null)).pending().size, "no evidence at all")
+    }
+
+    @Test
+    fun `a recycled pid with a different session is a different crash and is not lost`() {
+        val device = Device(
+            listOf(
+                record(now - 9_000_000, ApplicationExitInfo.REASON_CRASH, pid = 100, summary = RunSession.encode("run-a")),
+                record(now - 3_000, ApplicationExitInfo.REASON_CRASH, pid = 100, summary = RunSession.encode("run-b")),
+            ),
+        )
+        val source = launch(device)
+
+        val pending = source.pending()
+        assertEquals(listOf("run-a", "run-b"), pending.map { it.report.sessionId })
+
+        // Acknowledging the older one must not swallow the newer one.
+        source.acknowledge(listOf(pending[0].report.id))
+        assertEquals(listOf("run-b"), source.pending().map { it.report.sessionId })
+    }
+
+    @Test
     fun `skipped records do not move the watermark or hide later ones`() {
         val device = Device(listOf(record(now - 9_000, ApplicationExitInfo.REASON_EXIT_SELF)))
         val source = launch(device)

@@ -15,10 +15,12 @@ import kotlin.math.abs
  * **The rule.** A `REASON_CRASH` exit record and a JVM report are the same
  * crash when they name the same process and their timestamps are within
  * [CORRELATION_WINDOW_MILLIS] of each other. The process is compared through
- * the `process.pid` attribute the store writes; a report without one (written
- * by a build that did not record it) is matched by the window alone. When
- * several reports qualify the nearest in time wins, ties broken by id, and one
- * report joins at most one exit record.
+ * the `process.pid` attribute the store writes. A report without one (left by
+ * a build that did not record it) is never joined: the window alone cannot say
+ * which of an app's processes it came from, and a wrong join files one
+ * process's trace under another's exit record. The price is one duplicate for
+ * such a leftover. When several reports qualify the nearest in time wins, ties
+ * broken by id, and one report joins at most one exit record.
  *
  * The joined record keeps the JVM report's content (its trace is the point)
  * and takes the exit record's id, the session and the exit attributes. Its
@@ -109,10 +111,7 @@ internal class CrashReports(
         fun nearestJvmReport(candidates: List<NativeCrashReport>, id: ExitId): NativeCrashReport? =
             candidates
                 .filter { it.kind == "jvm" }
-                .filter { report ->
-                    val pid = report.attributes?.get("process.pid")?.toIntOrNull()
-                    pid == null || pid == id.pid
-                }
+                .filter { it.attributes?.get("process.pid")?.toIntOrNull() == id.pid }
                 .map { it to abs(it.timestampMicros / 1000L - id.timestampMillis) }
                 .filter { (_, distance) -> distance <= CORRELATION_WINDOW_MILLIS }
                 .minWithOrNull(compareBy({ it.second }, { it.first.id }))

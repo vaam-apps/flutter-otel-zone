@@ -99,10 +99,13 @@ internal class ExitInfoSource(
             records.historical()
                 .filter { it.timestampMillis > watermark && it.reason !in SKIPPED_REASONS }
                 .sortedWith(compareBy({ it.timestampMillis }, { it.pid }))
-                // A process dies once. See [acknowledge] for why the OS
+                // A process dies once. See [newestDuplicate] for why the OS
                 // sometimes files the same death twice, and why only the
                 // first of them is reported.
-                .distinctBy { it.pid to it.reason }
+                .fold(mutableListOf<ExitRecord>()) { kept, record ->
+                    if (kept.none { it.isSameDeathAs(record) }) kept.add(record)
+                    kept
+                }
                 .mapNotNull(::entry)
         } catch (_: Exception) {
             // A failing OS call must not take the JVM reports down with it.
@@ -140,15 +143,26 @@ internal class ExitInfoSource(
      * dismissed and the process is finally killed, which can be any time
      * later. [pending] reports the first; if only that one were acknowledged
      * the second, being newer than the watermark, would be reported as a
-     * crash of its own on the next launch. A record for the same pid and the
-     * same reason is the same death, so acknowledging one acknowledges all.
+     * crash of its own on the next launch. A record for the same pid, reason
+     * and run (see [ExitRecord.isSameDeathAs]) is the same death, so
+     * acknowledging one acknowledges all.
      */
     private fun newestDuplicate(accepted: List<ExitId>): Long {
-        val deaths = accepted.map { it.pid to it.reason }.toSet()
         return try {
-            records.historical()
-                .filter { (it.pid to it.reason) in deaths && it.timestampMillis <= nowMillis() + FUTURE_TOLERANCE_MILLIS }
-                .maxOfOrNull { it.timestampMillis } ?: 0L
+            val horizon = nowMillis() + FUTURE_TOLERANCE_MILLIS
+            val ring = records.historical()
+            var newest = 0L
+            for (id in accepted) {
+                val base = ring.firstOrNull {
+                    it.timestampMillis == id.timestampMillis && it.pid == id.pid && it.reason == id.reason
+                } ?: continue
+                for (other in ring) {
+                    if (other.timestampMillis <= horizon && base.isSameDeathAs(other)) {
+                        newest = maxOf(newest, other.timestampMillis)
+                    }
+                }
+            }
+            newest
         } catch (_: Exception) {
             0L
         }

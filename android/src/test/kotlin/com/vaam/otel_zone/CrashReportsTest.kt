@@ -154,14 +154,17 @@ class CrashReportsTest {
     }
 
     @Test
-    fun `a jvm report without a recorded pid is matched by the window alone`() {
+    fun `a jvm report without a recorded pid is never joined, so it cannot join the wrong process`() {
         jvmCrash(pid = 100, at = now - 5_000)
         // Rewrite as an older build would have: no process.pid.
         val file = crashes.listFiles { f -> f.name.endsWith(".json") }!!.single()
         file.writeText(file.readText().replace("\"process.pid\":\"100\"", "\"x\":\"y\""))
-        val device = Device(listOf(exit(now - 4_000, ApplicationExitInfo.REASON_CRASH, pid = 777)))
+        val device = Device(listOf(exit(now - 4_000, ApplicationExitInfo.REASON_CRASH, pid = 100)))
 
-        assertEquals(1, reports(device).pending().size)
+        val pending = reports(device).pending()
+
+        assertEquals(2, pending.size)
+        assertEquals(1, pending.count { it.id.startsWith("jvm-") })
     }
 
     @Test

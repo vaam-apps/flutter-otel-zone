@@ -30,6 +30,23 @@ internal class ExitRecord(
     private val openTrace: () -> InputStream?,
 ) {
     /**
+     * Whether [other] is the OS's second record of this same death.
+     *
+     * Same pid and reason is not enough on its own: pids are recycled, so two
+     * genuine crashes of different runs can share both. What tells the runs
+     * apart is the session id each process wrote into its state summary, so
+     * two records whose summaries are both present and differ are different
+     * deaths. A missing summary is not evidence of a different run, and is
+     * treated as compatible.
+     */
+    fun isSameDeathAs(other: ExitRecord): Boolean {
+        if (pid != other.pid || reason != other.reason) return false
+        val mine = processStateSummary
+        val theirs = other.processStateSummary
+        return mine == null || theirs == null || mine.contentEquals(theirs)
+    }
+
+    /**
      * The trace the OS took before the process died, or `null` when it did
      * not keep one. A trace that cannot be opened is the same answer: the
      * record is still worth reporting without it.
