@@ -44,6 +44,14 @@ internal class CrashStore(
     private val maxReports: Int = DEFAULT_MAX_REPORTS,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val staleTempMillis: Long = DEFAULT_STALE_TEMP_MILLIS,
+    /**
+     * This process's id, stored on every report so an OS exit record for the
+     * same death can be matched to it by [CrashReports]. A parameter because
+     * `android.os.Process` is a stub in a unit test.
+     */
+    private val pid: () -> Int = android.os.Process::myPid,
+    /** The run this store is writing in; see [RunSession]. */
+    private val sessionId: String? = null,
 ) : JvmCrashRecorder {
 
     private val sequence = AtomicLong(0)
@@ -60,7 +68,13 @@ internal class CrashStore(
             .put("type", throwable.javaClass.name)
             .put("message", throwable.message)
             .put("stacktrace", throwable.stackTraceToString())
-            .put("attributes", JSONObject().put("thread.name", thread.name))
+            .put("sessionId", sessionId)
+            .put(
+                "attributes",
+                JSONObject()
+                    .put("thread.name", thread.name)
+                    .put("process.pid", pid().toString()),
+            )
 
         val target = File(directory, "$id$SUFFIX")
         // Built from the directory, not from target.path: File(parent, child)

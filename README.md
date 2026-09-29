@@ -217,13 +217,28 @@ pending() -> redact -> FATAL LogRecord -> spool -> acknowledge
 - **Web is a no-op**, and a platform read that fails is one warning on the
   talker, never a thrown error.
 
-On Android the JVM side is live: a chained
-`Thread.setDefaultUncaughtExceptionHandler`, installed through androidx.startup
-before `Application.onCreate`, writes one JSON report per uncaught exception
-into `noBackupFilesDir/otel_zone/crashes`, and `pending()` returns them. Reading
-the OS's own record (`ApplicationExitInfo`) and the whole iOS side are still
-no-ops and land in their own tickets. That is what lets the contract be tested
-today — `NativeCrashSource` is the seam.
+On Android both sources are live, and they are joined so a crash is one record:
+
+- **JVM crashes** — a chained `Thread.setDefaultUncaughtExceptionHandler`,
+  installed through androidx.startup before `Application.onCreate`, writes one
+  JSON report per uncaught exception into `noBackupFilesDir/otel_zone/crashes`.
+- **The OS's own record (API 30+)** — `getHistoricalProcessExitReasons` returns
+  the same ring buffer on every launch and cannot be cleared, so records are
+  deduplicated by a watermark persisted in `noBackupFilesDir/otel_zone`. It
+  moves only in `acknowledge`, to the newest acknowledged record. Native crashes
+  (with the crashing thread's frames from the tombstone on API 31+), ANRs,
+  low-memory kills and other signals are reported once each. `EXIT_SELF`,
+  `USER_REQUESTED` and the other deliberate stops (app update, permission
+  change, user stop) are skipped. Below API 30 this source contributes nothing.
+- **Sessions** — each process run tags itself with a random session id through
+  `setProcessStateSummary`, so the next launch's exit record says which run it
+  ended (`session.id`).
+- **One crash, one record** — a `REASON_CRASH` exit record and the JVM report
+  for the same crash (same pid, timestamps within 30 s) are merged: the JVM
+  report's stack trace, the OS record's id and session.
+
+The iOS side is still a no-op and lands in its own ticket. That is what lets the
+contract be tested today — `NativeCrashSource` is the seam.
 
 The channel is generated, not written by hand:
 

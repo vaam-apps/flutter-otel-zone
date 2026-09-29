@@ -1,0 +1,42 @@
+build_fingerprint: "google/husky/husky:15/AP4A/eng.user:user/release-keys"
+pid: 4321
+tid: 4350
+signal_info {
+  number: 11
+  name: "SIGSEGV"
+  code: 1
+  code_name: "SEGV_MAPERR"
+  has_fault_address: true
+  fault_address: 0x10
+}
+abort_message: "Fatal signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x10"
+skipped_fixed64: 7
+skipped_fixed32: 9
+threads {
+  key: 4321
+  value {
+    id: 4321
+    name: "main"
+    current_backtrace { rel_pc: 0x100 pc: 0x7000000100 function_name: "epoll_wait" file_name: "/apex/com.android.runtime/lib64/bionic/libc.so" build_id: "aaaa" }
+  }
+}
+threads {
+  key: 4350
+  value {
+    id: 4350
+    name: "1.ui"
+    registers { name: "x0" u64: 0 }
+    registers { name: "pc" u64: 0x7abc001234 }
+    current_backtrace {
+      rel_pc: 0x1234 pc: 0x7abc001234 sp: 0x7fff0000
+      function_name: "crash_now" function_offset: 24
+      file_name: "/data/app/~~x7Yk/com.example.app-abc==/lib/arm64/libapp.so"
+      build_id: "0123456789abcdef0123456789abcdef01234567"
+    }
+    current_backtrace {
+      rel_pc: 0x2000 pc: 0x7abc002000
+      file_name: "/data/app/~~x7Yk/com.example.app-abc==/lib/arm64/libflutter.so"
+    }
+    current_backtrace { rel_pc: 0x9 pc: 0x7abc000009 }
+  }
+}
