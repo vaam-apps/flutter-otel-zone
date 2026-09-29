@@ -81,6 +81,15 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   static const String _suffix = '.spool.json';
   static const String _tempSuffix = '.tmp';
 
+  /// The journal of crash reports made durable here; see [handledReports].
+  /// Not a `*.spool.json`, so replay, eviction and the age cap never see it.
+  static const String _handledFile = 'handled-reports.json';
+
+  /// The most report ids the journal keeps. The platform holds a few dozen
+  /// unacknowledged reports at most, so this is far above what a real launch
+  /// needs; it only bounds a journal whose acknowledgements keep failing.
+  static const int _handledCap = 64;
+
   /// Distinguishes two batches written in the same microsecond.
   static int _sequence = 0;
 
@@ -138,17 +147,28 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// This is what lets the crash drain acknowledge a report and return while
   /// the network is still being tried: durable is the promise, delivered is
   /// the aim.
+  ///
+  /// [reportIds] are the platform reports the batch holds. They are written to
+  /// the journal [handledReports] reads once the batch is on disk and before
+  /// this returns, so the caller can acknowledge them knowing that a lost
+  /// acknowledgement will be recognised rather than spooled a second time.
   Future<bool> enqueue(
     List<ReadableLogRecord> logRecords, {
     bool evictLast = false,
+    List<String> reportIds = const <String>[],
   }) async {
     if (logRecords.isEmpty) return true;
 
     final _SpoolEntry? entry = await _writeAhead(
       logRecords,
       evictLast: evictLast,
+      reportIds: reportIds,
     );
     if (entry == null) return false;
+    // After the file and before delivery: the file carries the ids until it is
+    // deleted, and delivery is what deletes it, so the ids are always in one
+    // place or the other.
+    if (reportIds.isNotEmpty) await _rememberHandled(reportIds);
 
     late final Future<void> delivery;
     delivery = _deliver(entry, logRecords)
@@ -161,6 +181,104 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// Completes when every delivery [enqueue] started has finished.
   @visibleForTesting
   Future<void> settled() => Future.wait(_background.toList());
+
+  /// The platform reports [enqueue] made durable and [forgetHandled] has not
+  /// yet been told the platform acknowledged.
+  ///
+  /// The crash drain acknowledges a report right after [enqueue], but that is
+  /// a message to the platform, and the engine that sent it can be torn down
+  /// with the message still in flight — Android relaunches an activity, and
+  /// with it the Flutter engine, whenever an asset path or a package's
+  /// application info changes, which is routine in the first seconds after an
+  /// install or a boot. The relaunched app runs `start()` again, the platform
+  /// still holds the report, and without this it would be spooled and
+  /// delivered a second time. With it, the drain sees that the spool already
+  /// has the report and only repeats the acknowledgement.
+  ///
+  /// Empty when nothing is journalled, and when the journal cannot be read:
+  /// the fallback is the old behaviour, a report re-read and re-spooled, which
+  /// is a duplicate and never a loss.
+  Future<Set<String>> handledReports() async {
+    final Set<String> handled = <String>{};
+    // A batch still on disk names its own reports; it is the journal that
+    // covers one already delivered and deleted.
+    for (final File file in await _oldestFirst()) {
+      handled.addAll(await _reportsIn(file));
+    }
+    handled.addAll(await _journal());
+    return handled;
+  }
+
+  Future<Set<String>> _journal() async {
+    try {
+      final File file = File('${directory.path}/$_handledFile');
+      if (!await file.exists()) return <String>{};
+      return _strings(jsonDecode(await file.readAsString()));
+    } on Object {
+      return <String>{};
+    }
+  }
+
+  Future<Set<String>> _reportsIn(File file) async {
+    try {
+      final Object? decoded = jsonDecode(await file.readAsString());
+      return decoded is Map<String, dynamic>
+          ? _strings(decoded['reports'])
+          : <String>{};
+    } on Object {
+      return <String>{};
+    }
+  }
+
+  static Set<String> _strings(Object? decoded) => <String>{
+    if (decoded is List)
+      for (final Object? id in decoded)
+        if (id is String) id,
+  };
+
+  /// Removes [reportIds] from the journal, because the platform has
+  /// acknowledged them and will not offer them again. Never throws.
+  Future<void> forgetHandled(Iterable<String> reportIds) =>
+      _editHandled((Set<String> journal) => journal..removeAll(reportIds));
+
+  Future<void> _rememberHandled(Iterable<String> reportIds) =>
+      _editHandled((Set<String> journal) => journal..addAll(reportIds));
+
+  /// Serialised so two edits in this isolate cannot overwrite each other, and
+  /// written like a spool file (temp + rename) so a kill leaves the old
+  /// journal or the new one, never half of either.
+  Future<void> _editHandled(Set<String> Function(Set<String>) edit) {
+    return _handledEdits = _handledEdits.then((_) async {
+      try {
+        Set<String> journal = edit(await _journal());
+        if (journal.length > _handledCap) {
+          journal = journal.skip(journal.length - _handledCap).toSet();
+        }
+        final File target = File('${directory.path}/$_handledFile');
+        if (journal.isEmpty) {
+          await _delete(target);
+          return;
+        }
+        if (!await directory.exists()) {
+          await directory.create(recursive: true);
+        }
+        final File temp = File('${target.path}$_tempSuffix');
+        _writing.add(temp.path);
+        try {
+          await temp.writeAsString(jsonEncode(journal.toList()), flush: true);
+          await temp.rename(target.path);
+        } finally {
+          _writing.remove(temp.path);
+        }
+      } on Object {
+        // A journal that cannot be written costs a possible duplicate later,
+        // which is not worth failing the drain over.
+      }
+    });
+  }
+
+  /// The last journal edit, so the next one waits for it.
+  Future<void> _handledEdits = Future<void>.value();
 
   @override
   Future<void> forceFlush() => delegate.forceFlush();
@@ -319,6 +437,7 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   Future<_SpoolEntry?> _writeAhead(
     List<ReadableLogRecord> logRecords, {
     bool evictLast = false,
+    List<String> reportIds = const <String>[],
   }) async {
     final String micros = DateTime.now().microsecondsSinceEpoch
         .toString()
@@ -341,7 +460,7 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
       // process left behind.
       _writing.add(temp.path);
       try {
-        await temp.writeAsString(_encode(logRecords), flush: true);
+        await temp.writeAsString(_encode(logRecords, reportIds), flush: true);
         await temp.rename(entry.file.path);
       } finally {
         _writing.remove(temp.path);
@@ -475,12 +594,16 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
     }
   }
 
-  String _encode(List<ReadableLogRecord> logRecords) {
+  String _encode(List<ReadableLogRecord> logRecords, List<String> reportIds) {
     final Resource? resource = logRecords.first.resource;
     return jsonEncode(<String, Object?>{
       'v': 1,
       'resource': _encodeAttributes(resource?.attributes),
       'records': logRecords.map(_encodeRecord).toList(),
+      // The platform reports this batch holds, in the same file as the batch
+      // so that "the batch is durable" and "these reports are handled" are one
+      // atomic rename and never two.
+      if (reportIds.isNotEmpty) 'reports': reportIds,
     });
   }
 

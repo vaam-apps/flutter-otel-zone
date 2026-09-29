@@ -623,6 +623,162 @@ void main() {
     });
   });
 
+  group('the journal of handled reports', () {
+    test('a report id is journalled before enqueue returns', () async {
+      await spool.enqueue(
+        <ReadableLogRecord>[_record(body: 'crash')],
+        reportIds: <String>['exit-1', 'exit-2'],
+      );
+
+      expect(await spool.handledReports(), <String>{'exit-1', 'exit-2'});
+    });
+
+    test('a new exporter on the same directory reads it back', () async {
+      // The relaunched engine builds its own exporter: what it knows about the
+      // previous one has to come from disk.
+      await spool.enqueue(
+        <ReadableLogRecord>[_record()],
+        reportIds: <String>['exit-1'],
+      );
+
+      final SpoolingLogRecordExporter next = SpoolingLogRecordExporter(
+        delegate: delegate,
+        directory: directory,
+        maxAge: null,
+      );
+
+      expect(await next.handledReports(), <String>{'exit-1'});
+    });
+
+    test('the journal is not a spool file, so replay never sends it', () async {
+      delegate.failing = false;
+      await spool.enqueue(
+        <ReadableLogRecord>[_record()],
+        reportIds: <String>['exit-1'],
+      );
+      await spool.settled();
+
+      expect(await spool.replay(), 0);
+      expect(delegate.batches, hasLength(1));
+      expect(await spool.handledReports(), <String>{'exit-1'});
+    });
+
+    test('an enqueue that names no report writes no journal', () async {
+      await spool.enqueue(<ReadableLogRecord>[_record()]);
+
+      expect(await spool.handledReports(), isEmpty);
+      expect(
+        directory.listSync().whereType<File>().where(
+          (File f) => f.path.endsWith('handled-reports.json'),
+        ),
+        isEmpty,
+      );
+    });
+
+    test('forgetting the last id removes the file', () async {
+      delegate.failing = false;
+      await spool.enqueue(
+        <ReadableLogRecord>[_record()],
+        reportIds: <String>['exit-1', 'exit-2'],
+      );
+      await spool.settled();
+
+      await spool.forgetHandled(<String>['exit-1']);
+      expect(await spool.handledReports(), <String>{'exit-2'});
+
+      await spool.forgetHandled(<String>['exit-2']);
+      expect(await spool.handledReports(), isEmpty);
+      expect(_spoolFiles(directory), isEmpty);
+    });
+
+    test('keeps only the newest ids once it passes its cap', () async {
+      delegate.failing = false;
+      for (int i = 0; i < 70; i++) {
+        await spool.enqueue(
+          <ReadableLogRecord>[_record()],
+          reportIds: <String>['exit-$i'],
+        );
+      }
+      await spool.settled();
+
+      final Set<String> journal = await spool.handledReports();
+      expect(journal, hasLength(64));
+      expect(journal, contains('exit-69'));
+      expect(journal, isNot(contains('exit-0')));
+    });
+
+    test('an unreadable journal is an empty one', () async {
+      await Directory(directory.path).create(recursive: true);
+      await File(
+        '${directory.path}/handled-reports.json',
+      ).writeAsString('{ not json');
+
+      expect(await spool.handledReports(), isEmpty);
+    });
+
+    test(
+      'a journal that cannot be written does not fail the enqueue',
+      () async {
+        // A directory where the journal file should be: the rename cannot land.
+        await Directory('${directory.path}/handled-reports.json').create();
+
+        final bool durable = await spool.enqueue(
+          <ReadableLogRecord>[_record()],
+          reportIds: <String>['exit-1'],
+        );
+
+        expect(durable, isTrue);
+        // The batch on disk still names its report, which is what matters
+        // while the batch is there.
+        expect(await spool.handledReports(), <String>{'exit-1'});
+      },
+    );
+
+    test('a batch on disk names its own reports, with no journal', () async {
+      // The file and the journal are two writes; a kill between them must not
+      // leave a durable batch whose report nobody recognises.
+      await spool.enqueue(
+        <ReadableLogRecord>[_record()],
+        reportIds: <String>['exit-1'],
+      );
+      await spool.settled();
+      File('${directory.path}/handled-reports.json').deleteSync();
+
+      expect(await spool.handledReports(), <String>{'exit-1'});
+    });
+
+    test('once the batch is delivered only the journal remembers it', () async {
+      delegate.failing = false;
+      await spool.enqueue(
+        <ReadableLogRecord>[_record()],
+        reportIds: <String>['exit-1'],
+      );
+      await spool.settled();
+
+      expect(
+        _spoolFiles(
+          directory,
+        ).where((File f) => f.path.endsWith('.spool.json')),
+        isEmpty,
+      );
+      expect(await spool.handledReports(), <String>{'exit-1'});
+    });
+
+    test('an orphaned journal temp file is reclaimed', () async {
+      await spool.enqueue(
+        <ReadableLogRecord>[_record()],
+        reportIds: <String>['exit-1'],
+      );
+      final File orphan = File('${directory.path}/handled-reports.json.tmp')
+        ..writeAsStringSync('[]');
+
+      await spool.replay();
+
+      expect(orphan.existsSync(), isFalse);
+      expect(await spool.handledReports(), <String>{'exit-1'});
+    });
+  });
+
   group('cap', () {
     test('evicts the oldest batch once the cap is exceeded', () async {
       final SpoolingLogRecordExporter capped = SpoolingLogRecordExporter(

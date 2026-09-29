@@ -233,6 +233,17 @@ a crash report on a bad connection never delays the first frame.
   acknowledged only once the collector has accepted it; a phone that is offline
   re-reads it on the next launch. In that case the count in the start-up line
   is of reports handed off, not of reports the collector has taken.
+- **Delivered once, even when the engine is torn down mid-drain.** The
+  acknowledgement is a message to the platform, and Android destroys and
+  recreates an activity (and its Flutter engine) in the same process whenever an
+  asset path or the package's application info changes — routine in the first
+  seconds after an install or a boot. `main()` then runs again, the platform
+  still holds the report, and it would be delivered a second time. So the spool
+  writes the ids of the reports a batch holds into the batch itself, and into a
+  small journal until the platform confirms the acknowledgement; a drain that
+  is offered a report it already made durable only repeats the acknowledgement.
+  Without a spool the report is re-read and re-sent, which is the duplicate the
+  spool exists to prevent: prefer one.
   Acknowledging on durability means the spool's limits then apply to the
   report, and the file may be the only copy. They are narrow: being offline is
   never counted against it, a file is dropped by count only when the collector
@@ -390,11 +401,20 @@ assume it.
 `integration_test` cannot survive its own process dying, so the driver is on the
 host. For each kind, from a fresh install, `tool/android-crash-harness.dart`:
 launches the app and waits for `start()` to finish; asks for the crash with
-`adb shell am start --es otel_crash <kind>`; waits for the process to be gone;
-relaunches and requires **exactly one** FATAL record of that kind to have
-reached its own OTLP receiver (and the app's start-up line to say it recovered
-one); then relaunches again and requires none. It reads the wire, not a marker
-the app prints about itself.
+`adb shell am start --es otel_crash <kind>`; waits for the process to be gone
+**and for the OS to have filed its exit record** (the process being gone is not
+the OS knowing, and a launch that beats the record reads nothing); relaunches
+and requires **exactly one** FATAL record of that kind to have reached its own
+OTLP receiver; then relaunches again and requires none. It reads the wire, not
+a marker the app prints about itself.
+
+A launch is judged once it has been quiet for `--settle` seconds (default 3),
+not when the first start-up line appears. Android relaunches an activity in the
+same process, on its own, whenever an asset path or the package's application
+info changes, which is routine in the first seconds after an install or a boot,
+and the second engine runs `start()` again. So the assertion is on everything
+that reached the receiver over the launch, and the start-up line's "recovered
+N" is required to say exactly one only when the activity was not relaunched.
 
 ```bash
 cd example && flutter pub get && flutter create --platforms=android . && cd ..
@@ -422,9 +442,22 @@ cd .. && dart run tool/android-crash-harness.dart --no-build --kinds jvm,native 
   --upgrade-apk /tmp/app-1.0.1-2.apk
 ```
 
-`--kinds jvm,native` narrows it; `--retries` (default 1) re-runs a failed kind
-from a fresh install. The receiver (`tool/otlp-log-sink.dart`) decodes OTLP by
-hand and is unit-tested against the SDK's own encoder.
+`--kinds jvm,native` narrows it. There are no retries by default: a run either
+passes or is a defect (`--retries <n>` exists, and re-runs a failed kind from a
+fresh install, for a run that has to be pushed through anyway). `--repeat <n>`
+runs every kind `n` times and requires every run to pass, which is how a flake
+is measured; `--log-dir <path>` keeps each run's whole logcat and exit-info
+dump, and a failing run also prints the lines that decide it.
+
+`--relaunch-after 400,800,1200` provokes the relaunch above on purpose:
+`adb shell am update-appinfo` fires that many milliseconds into the recovery
+launch, one run per delay. It is how the duplicate this guards against was
+found (a relaunch landing between the spool and the acknowledgement made one
+crash arrive twice) and how it stays fixed; the window is tens of milliseconds
+wide and moves with the machine, so sweep it rather than trust one value.
+
+The receiver (`tool/otlp-log-sink.dart`) decodes OTLP by hand and is
+unit-tested against the SDK's own encoder.
 
 **The ANR needs two things a bare block does not give.** An ANR is declared
 only when something is *waiting* on the blocked main thread, so the script sends

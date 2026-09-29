@@ -13,10 +13,26 @@
 //      nothing may have been recovered;
 //   2. `am start --es otel_crash <kind>` delivers the request to the running
 //      activity, and the app kills itself on purpose;
-//   3. wait until the process is gone;
+//   3. wait until the process is gone, and until the OS has filed its exit
+//      record for it: the process being gone is not the OS knowing, and a
+//      launch that beats the record reads nothing;
 //   4. relaunch: exactly ONE FATAL record of `<kind>` must have reached the
-//      receiver, and the app's start-up line must say it recovered one;
+//      receiver;
 //   5. relaunch once more: nothing may have been recovered.
+//
+// A launch is judged once it has been quiet for `--settle` seconds, not when
+// the first start-up line appears. Android relaunches an activity in the same
+// process, by itself, whenever an asset path or the package's application info
+// changes, which is routine just after an install or a boot; the second engine
+// runs `start()` again. So the receiver's total is what is asserted, and the
+// start-up line's "recovered N" is required to be exactly 1 only when the
+// activity was not relaunched (the engine that recovered the crash can be torn
+// down before it logs). `--relaunch-after <ms,...>` provokes that relaunch on
+// purpose, one run per delay; the window in which it once duplicated a crash is
+// tens of milliseconds wide, so it is meant to be swept.
+//
+// There are no retries unless `--retries` asks for them: a run that needs one
+// is a defect, and `--repeat <n>` is how a flake is measured.
 //
 // Each recovered record must also say which build died: the attributes
 // `otel_zone.crashed.service.version` and `otel_zone.crashed.app.build_id`,
@@ -54,8 +70,10 @@ const String _extra = 'otel_crash';
 const String _crashedVersion = 'otel_zone.crashed.service.version';
 const String _crashedBuild = 'otel_zone.crashed.app.build_id';
 
-/// The app's start-up summary, which `start()` logs after the drain has
-/// exported and acknowledged, so its arrival means "the drain is over".
+/// The app's start-up summary, which `start()` logs once the drain has made
+/// the crash durable and acknowledged it, and the spool has been replayed. It
+/// does not mean the collector has the crash yet, which is why a launch is
+/// judged on what the receiver got and not on this line arriving.
 final RegExp _summary = RegExp(
   r'records at \w+ and above(?:, recovered (\d+) native crash)?',
 );
@@ -76,18 +94,40 @@ Future<void> main(List<String> arguments) async {
         'receiver on 127.0.0.1:${options.port}\n',
       );
       for (final String kind in options.kinds) {
-        var passed = false;
-        for (
-          var attempt = 0;
-          attempt <= options.retries && !passed;
-          attempt++
-        ) {
-          if (attempt > 0) {
-            stdout.writeln('  retrying $kind (attempt ${attempt + 1})');
+        var passes = 0;
+        var runs = 0;
+        for (var round = 1; round <= options.repeat; round++) {
+          for (final int? relaunchAfter in options.relaunchDelays) {
+            runs++;
+            var passed = false;
+            for (
+              var attempt = 0;
+              attempt <= options.retries && !passed;
+              attempt++
+            ) {
+              if (attempt > 0) {
+                stdout.writeln('  retrying $kind (attempt ${attempt + 1})');
+              }
+              final String tag =
+                  '$kind-$runs${attempt > 0 ? '-retry$attempt' : ''}';
+              passed = await _KindRun(
+                kind,
+                device,
+                sink,
+                apk,
+                options,
+                tag,
+                relaunchAfter,
+              ).run();
+            }
+            if (passed) {
+              passes++;
+            } else {
+              failures++;
+            }
           }
-          passed = await _KindRun(kind, device, sink, apk, options).run();
         }
-        if (!passed) failures++;
+        if (runs > 1) stdout.writeln('$kind: $passes/$runs runs passed\n');
       }
     }
   } finally {
@@ -105,6 +145,10 @@ class _Options {
     required this.port,
     required this.build,
     required this.retries,
+    required this.repeat,
+    required this.logDir,
+    required this.relaunchDelays,
+    required this.settle,
     required this.deathTimeout,
     required this.releaseRefusal,
     required this.apk,
@@ -146,7 +190,17 @@ class _Options {
       kinds: (values['kinds'] ?? 'jvm,native,anr').split(','),
       port: int.parse(values['port'] ?? '4421'),
       build: !flags.contains('no-build'),
-      retries: int.parse(values['retries'] ?? '1'),
+      retries: int.parse(values['retries'] ?? '0'),
+      repeat: int.parse(values['repeat'] ?? '1'),
+      logDir: values['log-dir'],
+      relaunchDelays: <int?>[
+        if (values['relaunch-after'] == null)
+          null
+        else
+          for (final String ms in values['relaunch-after']!.split(','))
+            int.parse(ms),
+      ],
+      settle: Duration(seconds: int.parse(values['settle'] ?? '3')),
       deathTimeout: Duration(
         seconds: int.parse(values['death-timeout'] ?? '90'),
       ),
@@ -166,6 +220,15 @@ class _Options {
   final int port;
   final bool build;
   final int retries;
+  final int repeat;
+  final String? logDir;
+
+  /// How long after each recovery launch starts the OS is made to relaunch
+  /// the activity, one run per delay; `null` for none.
+  final List<int?> relaunchDelays;
+
+  /// How long a launch must stay quiet before it is judged.
+  final Duration settle;
   final Duration deathTimeout;
   final bool releaseRefusal;
   final String? apk;
@@ -195,7 +258,16 @@ usage: dart run tool/android-crash-harness.dart [options]
   --port <n>             local receiver port; default 4421
   --apk <path>           debug APK to install; default: build one
   --no-build             use the existing APK instead of building
-  --retries <n>          re-run a failed kind this many times; default 1
+  --retries <n>          re-run a failed kind this many times; default 0
+  --repeat <n>           run each kind n times, every run must pass; default 1
+  --settle <s>           how long a launch must stay quiet, with no new
+                         start-up line and no new record, before it is judged;
+                         default 3
+  --relaunch-after <ms,ms,...>
+                         make Android relaunch the activity, in the same
+                         process, this long after each recovery launch starts;
+                         one run per delay
+  --log-dir <path>       keep each run's full logcat and exit-info dump here
   --death-timeout <s>    how long to wait for the process to die; default 90
   --upgrade-apk <path>   install this build over the crashed one (data kept)
                          before relaunching, and check the record names the
@@ -324,32 +396,52 @@ class _Device {
 
   Future<void> forceStop() => shell(<String>['am', 'force-stop', _package]);
 
-  /// Starts the activity and returns the first start-up summary logged after
-  /// this call, or `null` if it never came.
-  Future<_Summary?> launch({
-    Duration timeout = const Duration(seconds: 90),
-  }) async {
-    await adbCommand(<String>['logcat', '-c']);
-    await shell(<String>['am', 'start', '-W', '-n', _activity]);
-    return waitForSummary(timeout);
+  /// Tells the running app its `ApplicationInfo` changed, which makes Android
+  /// destroy and recreate its activities in the same process: the relaunch the
+  /// OS does by itself when a package is updated or its assets change.
+  Future<void> updateAppInfo() async {
+    try {
+      await shell(<String>['am', 'update-appinfo', '0', _package]);
+    } on Object {
+      // Best effort.
+    }
   }
 
-  Future<_Summary?> waitForSummary(Duration timeout) async {
-    final Stopwatch clock = Stopwatch()..start();
-    while (clock.elapsed < timeout) {
-      final String log = await adbCommand(<String>[
-        'logcat',
-        '-d',
-        '-s',
-        'flutter:I',
-      ]);
-      final RegExpMatch? match = _summary.firstMatch(log);
-      if (match != null) {
-        return _Summary(int.parse(match.group(1) ?? '0'), match.group(0)!);
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 500));
+  /// Starts the activity, first clearing the log so that what is read back
+  /// belongs to this launch.
+  ///
+  /// [relaunchAfter] makes the OS relaunch the activity that long after the
+  /// start was requested.
+  Future<void> start({Duration? relaunchAfter}) async {
+    await adbCommand(<String>['logcat', '-b', 'all', '-c']);
+    if (relaunchAfter != null) {
+      Timer(relaunchAfter, () => unawaited(updateAppInfo()));
     }
-    return null;
+    await shell(<String>['am', 'start', '-W', '-n', _activity]);
+  }
+
+  /// Every start-up line the app has logged since the log was last cleared,
+  /// in order, each with the line it came from (which names the process).
+  ///
+  /// More than one when the activity was relaunched in the same process: each
+  /// engine runs `start()` and logs its own.
+  Future<List<_Summary>> summaries() async {
+    final String log = await adbCommand(<String>[
+      'logcat',
+      '-d',
+      '-v',
+      'threadtime',
+      '-s',
+      'flutter:I',
+    ]);
+    return <_Summary>[
+      for (final String line in const LineSplitter().convert(log))
+        for (final RegExpMatch match in _summary.allMatches(line))
+          _Summary(
+            int.parse(match.group(1) ?? '0'),
+            line.replaceAll(RegExp(r'\x1B\[[0-9;]*m'), '').trim(),
+          ),
+    ];
   }
 
   Future<bool> waitForDeath(Duration timeout) async {
@@ -363,6 +455,80 @@ class _Device {
 
   Future<String> exitInfo() =>
       shell(<String>['dumpsys', 'activity', 'exit-info', _package]);
+
+  /// How many times the main activity was created since the log was last
+  /// cleared. More than once means Android relaunched it, in the same process.
+  Future<int> activityCreations() async {
+    final String log = await adbCommand(<String>[
+      'logcat',
+      '-d',
+      '-b',
+      'events',
+      '-s',
+      'wm_on_create_called',
+    ]);
+    return const LineSplitter()
+        .convert(log)
+        .where((String line) => line.contains('.MainActivity'))
+        .length;
+  }
+
+  /// Waits until the OS has filed an exit record of [reason] for [pid].
+  ///
+  /// The process being gone (`pidof`) is not the OS knowing it: the record is
+  /// written by the activity manager afterwards, and on a loaded device that
+  /// can be many seconds later. A relaunch in between reads no record, reports
+  /// nothing, and the crash turns up on a later launch instead.
+  Future<bool> waitForExitRecord(
+    int pid,
+    int reason, {
+    Duration timeout = const Duration(seconds: 60),
+  }) async {
+    final RegExp record = RegExp(
+      'pid=$pid\\b(?:(?!ApplicationExitInfo)[\\s\\S])*?reason=$reason \\(',
+    );
+    final Stopwatch clock = Stopwatch()..start();
+    while (clock.elapsed < timeout) {
+      if (record.hasMatch(await exitInfo())) return true;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+    return false;
+  }
+
+  /// Streams the whole device log (every buffer, with pid and time) into
+  /// [path] until [_LogCapture.stop].
+  Future<_LogCapture> captureLog(String path) async {
+    final Process process = await Process.start(adb, <String>[
+      '-s',
+      serial,
+      'logcat',
+      '-v',
+      'threadtime',
+      '-b',
+      'all',
+    ]);
+    unawaited(process.stderr.drain<void>());
+    final IOSink sink = File(path).openWrite();
+    return _LogCapture(process, sink, process.stdout.pipe(sink));
+  }
+}
+
+/// A running `adb logcat` that is being written to a file.
+class _LogCapture {
+  _LogCapture(this._process, this._sink, this._done);
+
+  final Process _process;
+  final IOSink _sink;
+  final Future<void> _done;
+
+  Future<void> stop() async {
+    _process.kill();
+    try {
+      await _done;
+    } on Object {
+      await _sink.close();
+    }
+  }
 }
 
 class _Summary {
@@ -372,15 +538,55 @@ class _Summary {
   final String line;
 }
 
+/// What one launch did: every start-up line the app logged and every record
+/// the receiver was sent, once the launch went quiet.
+class _Launch {
+  const _Launch(this.summaries, this.records, this.creations);
+
+  final List<_Summary> summaries;
+  final List<SinkRecord> records;
+
+  /// How many times the main activity was created. Two or more is a relaunch
+  /// in the same process, which the OS does on its own after an install or a
+  /// boot and which a start-up line can be lost to: the engine that would have
+  /// logged it is torn down first.
+  final int creations;
+
+  bool get relaunched => creations > 1;
+
+  /// How many native crashes the app said it recovered, over every start-up
+  /// line: a relaunched activity runs `start()` again, in the same process.
+  int get recovered =>
+      summaries.fold(0, (int n, _Summary s) => n + s.recovered);
+
+  List<String> get kinds => <String>[
+    for (final SinkRecord r in records)
+      if (r.crashKind != null) r.crashKind!,
+  ];
+}
+
 /// One kind, end to end.
 class _KindRun {
-  _KindRun(this.kind, this.device, this.sink, this.apk, this.options);
+  _KindRun(
+    this.kind,
+    this.device,
+    this.sink,
+    this.apk,
+    this.options,
+    this.tag,
+    this.relaunchAfter,
+  );
 
   final String kind;
+  final String tag;
   final _Device device;
   final OtlpLogSink sink;
   final String apk;
   final _Options options;
+
+  /// When the OS is made to relaunch the activity during the recovery launch,
+  /// or `null` to leave it alone.
+  final int? relaunchAfter;
 
   final List<String> _problems = <String>[];
 
@@ -388,8 +594,18 @@ class _KindRun {
     if (!condition) _problems.add(message);
   }
 
+  /// The `ApplicationExitInfo` reason the OS files for each kind of death.
+  int get _exitReason => switch (kind) {
+    'jvm' => 4, // REASON_CRASH
+    'native' => 5, // REASON_CRASH_NATIVE
+    _ => 6, // REASON_ANR
+  };
+
   Future<bool> run() async {
-    stdout.writeln('== $kind');
+    stdout.writeln(
+      '== $kind'
+      '${relaunchAfter == null ? '' : ' (activity relaunched ${relaunchAfter}ms into the recovery launch)'}',
+    );
     // The ANR path needs the OS to kill the app the moment it declares the
     // ANR. With the dialog enabled the process lives until someone taps
     // "Close app"; this setting makes the OS do that itself and is restored
@@ -397,21 +613,31 @@ class _KindRun {
     final String? hideDialogs = kind == 'anr'
         ? await _hideErrorDialogs(device)
         : null;
+    final String? logDir = options.logDir;
+    _LogCapture? capture;
+    if (logDir != null) {
+      Directory(logDir).createSync(recursive: true);
+      capture = await device.captureLog('$logDir/$tag.logcat.txt');
+    }
     try {
       await device.reinstall(apk);
-      sink.clear();
 
-      final _Summary? first = await device.launch();
-      _expect(first != null, 'launch 1: no start-up line within the timeout');
+      final _Launch first = await _launch(expected: 0);
       _expect(
-        first?.recovered == 0,
-        'launch 1: recovered ${first?.recovered}, expected 0',
+        first.summaries.isNotEmpty,
+        'launch 1: no start-up line within the timeout',
       );
-      await _settle();
-      _expect(_kinds().isEmpty, 'launch 1: unexpected records ${_kinds()}');
-      stdout.writeln('  launch 1: "${first?.line}"');
+      _expect(
+        first.recovered == 0,
+        'launch 1: recovered ${first.recovered}, expected 0',
+      );
+      _expect(
+        first.kinds.isEmpty,
+        'launch 1: unexpected records ${first.kinds}',
+      );
+      stdout.writeln('  launch 1: ${_lines(first)}');
 
-      sink.clear();
+      final int? crashing = await device.pid();
       await _trigger();
       final bool died = await device.waitForDeath(options.deathTimeout);
       _expect(
@@ -419,6 +645,13 @@ class _KindRun {
         'the process did not die within ${options.deathTimeout.inSeconds}s',
       );
       stdout.writeln('  process died: $died');
+      // Gone is not recorded: the OS files its exit record afterwards, and a
+      // launch that beats it reads nothing.
+      final bool recorded =
+          crashing != null &&
+          await device.waitForExitRecord(crashing, _exitReason);
+      _expect(recorded, 'the OS filed no exit record for pid $crashing');
+      stdout.writeln('  exit record filed: $recorded');
 
       final String? upgradeApk = options.upgradeApk;
       if (upgradeApk != null) {
@@ -429,23 +662,45 @@ class _KindRun {
         );
       }
 
-      final _Summary? second = await device.launch();
-      await _settle();
-      final List<SinkRecord> received = sink.records;
-      stdout.writeln('  launch 2: "${second?.line}"');
-      for (final SinkRecord record in received) {
+      final int? relaunch = relaunchAfter;
+      final _Launch second = await _launch(
+        expected: 1,
+        relaunchAfter: relaunch == null
+            ? null
+            : Duration(milliseconds: relaunch),
+      );
+      stdout.writeln(
+        '  launch 2: ${_lines(second)}'
+        '${second.relaunched ? '\n            (the activity was relaunched: created ${second.creations} times)' : ''}',
+      );
+      for (final SinkRecord record in second.records) {
         stdout.writeln('    received $record');
       }
-      _expect(second != null, 'launch 2: no start-up line within the timeout');
       _expect(
-        second?.recovered == 1,
-        'launch 2: recovered ${second?.recovered}, expected 1',
+        second.summaries.isNotEmpty || second.relaunched,
+        'launch 2: no start-up line within the timeout',
       );
+      // What reached the receiver is the assertion; the start-up line is a
+      // second opinion. After a relaunch it can be missing — the engine that
+      // recovered the crash was torn down before it logged — or say 0, from
+      // the engine that found the report already spooled. Never more than one.
+      if (second.relaunched) {
+        _expect(
+          second.recovered <= 1,
+          'launch 2: recovered ${second.recovered} in total, expected at most 1',
+        );
+      } else {
+        _expect(
+          second.recovered == 1,
+          'launch 2: recovered ${second.recovered}, expected 1',
+        );
+      }
       _expect(
-        _kinds().length == 1 && _kinds().single == kind,
-        'launch 2: expected exactly one "$kind" record, received ${_kinds()}',
+        second.kinds.length == 1 && second.kinds.single == kind,
+        'launch 2: expected exactly one "$kind" record, '
+        'received ${second.kinds}',
       );
-      final Iterable<SinkRecord> crashes = received.where(
+      final Iterable<SinkRecord> crashes = second.records.where(
         (SinkRecord r) => r.crashKind != null,
       );
       _expect(
@@ -493,17 +748,21 @@ class _KindRun {
         'launch 2: expected event.name "$event", got ${crashes.map((SinkRecord r) => r.eventName).toList()}',
       );
 
-      sink.clear();
       await device.forceStop();
-      final _Summary? third = await device.launch();
-      await _settle();
-      stdout.writeln('  launch 3: "${third?.line}"');
-      _expect(third != null, 'launch 3: no start-up line within the timeout');
+      final _Launch third = await _launch(expected: 0);
+      stdout.writeln('  launch 3: ${_lines(third)}');
       _expect(
-        third?.recovered == 0,
-        'launch 3: recovered ${third?.recovered}, expected 0',
+        third.summaries.isNotEmpty,
+        'launch 3: no start-up line within the timeout',
       );
-      _expect(_kinds().isEmpty, 'launch 3: duplicate records ${_kinds()}');
+      _expect(
+        third.recovered == 0,
+        'launch 3: recovered ${third.recovered}, expected 0',
+      );
+      _expect(
+        third.kinds.isEmpty,
+        'launch 3: duplicate records ${third.kinds}',
+      );
     } finally {
       await device.forceStop();
       if (kind == 'anr') await _restoreErrorDialogs(device, hideDialogs);
@@ -511,23 +770,104 @@ class _KindRun {
 
     if (_problems.isEmpty) {
       stdout.writeln('  PASS $kind: drained exactly once, then zero\n');
+      await _keepEvidence(logDir, capture);
       return true;
     }
     for (final String problem in _problems) {
       stdout.writeln('  FAIL $kind: $problem');
     }
     stdout.writeln('');
+    await _keepEvidence(logDir, capture, print: true);
     return false;
   }
 
-  List<String> _kinds() => <String>[
-    for (final SinkRecord r in sink.records)
-      if (r.crashKind != null) r.crashKind!,
-  ];
+  /// The start-up lines of [launch], with the process each came from.
+  String _lines(_Launch launch) => launch.summaries.isEmpty
+      ? 'no start-up line'
+      : launch.summaries
+            .map((_Summary s) => '"${s.line}"')
+            .join('\n            ');
 
-  /// The receiver is fed before the summary is logged; this only covers a
-  /// record that is still in flight.
-  Future<void> _settle() => Future<void>.delayed(const Duration(seconds: 2));
+  /// Starts the app and waits until the launch has gone quiet: at least one
+  /// start-up line, at least [expected] recovered records at the receiver, and
+  /// then nothing new for [_Options.settle].
+  ///
+  /// It is not enough to take the first start-up line and read the receiver a
+  /// moment later. The activity can be relaunched in the same process — Android
+  /// does it by itself when an asset path or a package's application info
+  /// changes, which is routine in the first seconds after an install or a boot
+  /// — and the second engine then runs `start()` again. That is not a fault
+  /// in itself; what is under test is what reached the receiver, in total.
+  Future<_Launch> _launch({
+    required int expected,
+    Duration? relaunchAfter,
+    Duration timeout = const Duration(seconds: 90),
+  }) async {
+    sink.clear();
+    await device.start(relaunchAfter: relaunchAfter);
+    final Stopwatch clock = Stopwatch()..start();
+    var fingerprint = '';
+    var changedAt = clock.elapsed;
+    _Launch latest = const _Launch(<_Summary>[], <SinkRecord>[], 0);
+    while (clock.elapsed < timeout) {
+      latest = _Launch(
+        await device.summaries(),
+        sink.records,
+        await device.activityCreations(),
+      );
+      final String now =
+          '${latest.summaries.length}/${latest.records.length}/'
+          '${latest.creations}';
+      if (now != fingerprint) {
+        fingerprint = now;
+        changedAt = clock.elapsed;
+      }
+      final bool complete =
+          (latest.summaries.isNotEmpty || latest.relaunched) &&
+          latest.kinds.length >= expected;
+      if (complete && clock.elapsed - changedAt >= options.settle) break;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+    return latest;
+  }
+
+  /// Stops the log capture and keeps what the OS itself recorded about the
+  /// deaths, so a failure can be read afterwards instead of re-run.
+  ///
+  /// A failed run also prints the lines that decide the outcome — process
+  /// starts and deaths, the crash, the activity lifecycle, the app's own
+  /// output — because a CI log is the one place a flake is seen.
+  Future<void> _keepEvidence(
+    String? logDir,
+    _LogCapture? capture, {
+    bool print = false,
+  }) async {
+    if (logDir == null || capture == null) return;
+    await capture.stop();
+    final String exits = await device.exitInfo();
+    File('$logDir/$tag.exit-info.txt').writeAsStringSync(exits);
+    if (!print) return;
+    stdout.writeln('  --- exit-info after the run ---\n$exits');
+    final RegExp interesting = RegExp(
+      r'am_proc_start|am_proc_died|am_crash|am_kill|am_proc_bound|'
+      r'wm_create_activity|wm_restart_activity|wm_finish_activity|'
+      r'wm_task_(created|removed)|wm_destroy_activity|ActivityTaskManager: START|'
+      r'Force finishing|Sending signal|Fatal signal|tombstoned|'
+      r'OtelZone|flutter *:|Zygote *: Process|has died',
+    );
+    final List<String> lines = <String>[
+      for (final String line in File(
+        '$logDir/$tag.logcat.txt',
+      ).readAsLinesSync())
+        if (line.contains(_package) ||
+            (interesting.hasMatch(line) &&
+                !line.contains(' DEBUG '))) ...<String>[line],
+    ];
+    stdout.writeln('  --- log ($tag), ${lines.length} lines ---');
+    for (final String line in lines.take(400)) {
+      stdout.writeln('  $line');
+    }
+  }
 
   Future<void> _trigger() async {
     await device.shell(<String>[

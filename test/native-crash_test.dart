@@ -295,6 +295,116 @@ void main() {
       );
     });
 
+    /// The drain a relaunched activity runs: a new engine has a new exporter
+    /// and a new platform channel, and shares only the directory.
+    NativeCrashDrain relaunched(_FakeSource source, List<String> warnings) =>
+        drain(
+          source,
+          SpoolingLogRecordExporter(
+            delegate: _RecordingExporter(result: ExportResult.failure),
+            directory: directory,
+            maxAge: null,
+          ),
+          warnings: warnings,
+        );
+
+    List<File> spoolFiles() => directory
+        .listSync()
+        .whereType<File>()
+        .where((File f) => f.path.endsWith('.spool.json'))
+        .toList();
+
+    test('a report whose acknowledge was lost with its engine is acknowledged '
+        'again, not spooled twice', () async {
+      // The first engine spools the report and is torn down with the
+      // acknowledge still in flight, so the platform still holds it.
+      final List<String> warnings = <String>[];
+      final _FakeSource first = _FakeSource(<NativeCrashReport>[_report()])
+        ..acknowledgeThrows = true;
+      expect(await relaunched(first, warnings).drain(), 1);
+      expect(first.acknowledged, isEmpty);
+      expect(spoolFiles(), hasLength(1));
+
+      // The relaunched engine is offered the same report.
+      final _FakeSource second = _FakeSource(<NativeCrashReport>[_report()]);
+      final int count = await relaunched(second, warnings).drain();
+
+      expect(count, 0, reason: 'nothing new was taken responsibility for');
+      expect(second.acknowledged, <List<String>>[
+        <String>['a'],
+      ]);
+      expect(spoolFiles(), hasLength(1), reason: 'one copy, not two');
+    });
+
+    test('the journal is cleared once the platform has acknowledged', () async {
+      final SpoolingLogRecordExporter spool = SpoolingLogRecordExporter(
+        delegate: _RecordingExporter(),
+        directory: directory,
+        maxAge: null,
+      );
+
+      await drain(_FakeSource(<NativeCrashReport>[_report()]), spool).drain();
+      await spool.settled();
+
+      expect(await spool.handledReports(), isEmpty);
+      expect(directory.listSync(), isEmpty);
+    });
+
+    test(
+      'a delivered report stays journalled until the platform acknowledges',
+      () async {
+        // The batch is delivered and deleted, so only the journal is left to
+        // say the report was handled.
+        final _RecordingExporter delegate = _RecordingExporter();
+        final SpoolingLogRecordExporter spool = SpoolingLogRecordExporter(
+          delegate: delegate,
+          directory: directory,
+          maxAge: null,
+        );
+        final _FakeSource source = _FakeSource(<NativeCrashReport>[_report()])
+          ..acknowledgeThrows = true;
+
+        await drain(source, spool).drain();
+        await spool.settled();
+        await drain(source, spool).drain();
+        await spool.settled();
+
+        expect(spoolFiles(), isEmpty);
+        expect(await spool.handledReports(), <String>{'a'});
+        expect(delegate.batches, hasLength(1), reason: 'delivered once');
+
+        source.acknowledgeThrows = false;
+        await drain(source, spool).drain();
+
+        expect(source.acknowledged, <List<String>>[
+          <String>['a'],
+        ]);
+        expect(await spool.handledReports(), isEmpty);
+        expect(delegate.batches, hasLength(1), reason: 'still once');
+      },
+    );
+
+    test(
+      'a new report beside an already-spooled one is spooled alone',
+      () async {
+        final List<String> warnings = <String>[];
+        await relaunched(
+          _FakeSource(<NativeCrashReport>[_report()])..acknowledgeThrows = true,
+          warnings,
+        ).drain();
+
+        final _FakeSource second = _FakeSource(<NativeCrashReport>[
+          _report(),
+          _report(id: 'b'),
+        ]);
+        final int count = await relaunched(second, warnings).drain();
+
+        expect(count, 1, reason: 'only b is new');
+        expect(second.acknowledged.single, unorderedEquals(<String>['a', 'b']));
+        expect(spoolFiles(), hasLength(2));
+      },
+    );
+
     test(
       'an acknowledged report is delivered once, and the file goes',
       () async {

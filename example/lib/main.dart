@@ -9,6 +9,8 @@
 //     one.
 //  3. `start()` runs, with whatever the device could tell us about itself.
 //     It never throws.
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:otel_zone/otel_zone.dart';
 
@@ -22,6 +24,14 @@ final OtelZone observability = OtelZone(
       defaultValue: 'http://localhost:4318',
     ),
     deploymentEnvironmentName: 'development',
+    // A recovered crash is acknowledged once it is on disk here, and delivered
+    // from here, so it survives the app being killed or relaunched before the
+    // collector has answered. Without a spool it is acknowledged only after
+    // the collector accepts it, which leaves a window in which a relaunch
+    // reports it twice. `getApplicationSupportDirectory` from `path_provider`
+    // is the right home in a real app; the cache directory keeps this example
+    // free of the dependency.
+    spoolDirectory: () => Directory('${Directory.systemTemp.path}/otel-zone'),
     // Read from somewhere untyped, so a typo has to report itself rather
     // than quietly change what this build sends.
     exportFloor: ExportFloor.parse(

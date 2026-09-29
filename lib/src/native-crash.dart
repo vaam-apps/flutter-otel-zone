@@ -149,6 +149,12 @@ class NativeCrashDrain {
   /// unconditional, and `spoolMaxBatches`, which evicts every ordinary batch
   /// before it touches one marked here as a crash report.
   ///
+  /// The acknowledgement is a message to the platform, and the engine that
+  /// sends it can be torn down with the message in flight — an activity
+  /// relaunch does exactly that. So the spool journals the reports it made
+  /// durable, and a drain that is offered one of them again only repeats the
+  /// acknowledgement: the report is delivered once, not once per engine.
+  ///
   /// Without a spool, or when it cannot be written, the export is started
   /// without being awaited and the acknowledgement follows only if the
   /// collector accepts it, so the platform's copy stays the durable one. In
@@ -166,25 +172,55 @@ class NativeCrashDrain {
     final List<NativeCrashReport>? reports = await _pending();
     if (reports == null || reports.isEmpty) return 0;
 
+    final LogRecordExporter target = exporter;
+    final SpoolingLogRecordExporter? spool = target is SpoolingLogRecordExporter
+        ? target
+        : null;
+
+    // Reports an earlier drain already made durable but whose acknowledgement
+    // never landed. See [SpoolingLogRecordExporter.handledReports]: they are
+    // acknowledged again, and not spooled again.
+    final Set<String> handled = await spool?.handledReports() ?? <String>{};
+
     final List<ReadableLogRecord> records = <ReadableLogRecord>[];
     // Only the reports that made a record. One whose redactor threw is
     // dropped rather than exported raw, and a dropped report must not be
     // acknowledged — its OS record has to stay readable for the next launch.
     final List<String> delivered = <String>[];
+    final List<String> alreadyDurable = <String>[];
     for (final NativeCrashReport report in reports) {
+      if (handled.contains(report.id)) {
+        alreadyDurable.add(report.id);
+        continue;
+      }
       final ReadableLogRecord? record = _toLogRecord(report);
       if (record == null) continue;
       records.add(record);
       delivered.add(report.id);
     }
-    if (records.isEmpty) return 0;
 
-    final LogRecordExporter target = exporter;
-    if (target is SpoolingLogRecordExporter &&
-        await target.enqueue(records, evictLast: true)) {
-      await _acknowledge(delivered);
-      return records.length;
+    // Durable once it is on disk. A spool that cannot be written leaves the
+    // reports with the platform and the plain exporter below.
+    final bool durable =
+        spool != null &&
+        (records.isEmpty ||
+            await spool.enqueue(
+              records,
+              evictLast: true,
+              reportIds: delivered,
+            ));
+    if (spool != null) {
+      final List<String> ids = <String>[
+        if (durable) ...delivered,
+        ...alreadyDurable,
+      ];
+      if (ids.isNotEmpty && await _acknowledge(ids)) {
+        await spool.forgetHandled(ids);
+      }
     }
+    if (durable) return records.length;
+
+    if (records.isEmpty) return 0;
 
     late final Future<void> export;
     export = _exportThenAcknowledge(
@@ -203,14 +239,19 @@ class NativeCrashDrain {
     await _acknowledge(ids);
   }
 
-  Future<void> _acknowledge(List<String> ids) async {
+  /// Acknowledges [ids] and says whether the platform took it.
+  Future<bool> _acknowledge(List<String> ids) async {
     try {
       await source.acknowledge(ids);
+      return true;
     } on Object catch (error) {
       // The records are safe but the platform does not know it, so they will
-      // be read again and exported again. A duplicate is better than a loss,
-      // and this is the one place that trade is made.
+      // be read again. With a spool the journal recognises them and only the
+      // acknowledgement is repeated; without one they are exported again. A
+      // duplicate is better than a loss, and this is the one place that
+      // trade is made.
       onWarning('Native crash reports were kept but not acknowledged: $error');
+      return false;
     }
   }
 
