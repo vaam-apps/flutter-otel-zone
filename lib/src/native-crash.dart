@@ -146,8 +146,24 @@ class NativeCrashDrain {
   /// dropped after `spoolMaxAttempts` failures only when the collector is
   /// demonstrably accepting other batches and still refusing this one, with
   /// one warning. The bounds that remain are `spoolMaxAge`, which is
-  /// unconditional, and `spoolMaxBatches`, which evicts every ordinary batch
-  /// before it touches one marked here as a crash report.
+  /// unconditional, `spoolMaxBatches` and `spoolMaxBytes`, which evict every
+  /// ordinary batch before they touch one marked here as a crash report, and a
+  /// crash report evicted that way is warned about and taken off the journal, so
+  /// the platform hands it over again rather than treating it as delivered.
+  ///
+  /// A report is acknowledged only when it is on disk or the collector has
+  /// taken it, never before. The reports are spooled as one batch. If that is
+  /// refused, as it is when together they are larger than `spoolMaxBytes` or
+  /// more than `spoolMaxBatches`, each is spooled on its own, newest first, and
+  /// never by evicting a crash report that is already on disk: that one has
+  /// been acknowledged, so the file is the only copy it has. A report that does
+  /// not fit that way, or is over `spoolMaxBytes` by itself, is not spooled. It
+  /// is exported directly, and acknowledged only once the collector has taken
+  /// it; until then the platform keeps it and the next drain offers it again.
+  /// Should the same reports recur over the cap every launch, the newest that
+  /// fit stay durable and the rest stay with the platform, delivered when the
+  /// collector answers or bounded by the platform's own store cap; they never
+  /// block newer ones, which are spooled or acknowledged first.
   ///
   /// The acknowledgement is a message to the platform, and the engine that
   /// sends it can be torn down with the message in flight — an activity
@@ -187,6 +203,7 @@ class NativeCrashDrain {
     // dropped rather than exported raw, and a dropped report must not be
     // acknowledged — its OS record has to stay readable for the next launch.
     final List<String> delivered = <String>[];
+    final List<int> timestamps = <int>[];
     final List<String> alreadyDurable = <String>[];
     for (final NativeCrashReport report in reports) {
       if (handled.contains(report.id)) {
@@ -197,37 +214,90 @@ class NativeCrashDrain {
       if (record == null) continue;
       records.add(record);
       delivered.add(report.id);
+      timestamps.add(report.timestampMicros);
     }
 
     // Durable once it is on disk. A spool that cannot be written leaves the
     // reports with the platform and the plain exporter below.
-    final bool durable =
-        spool != null &&
-        (records.isEmpty ||
-            await spool.enqueue(
-              records,
-              evictLast: true,
-              reportIds: delivered,
-            ));
+    final List<String> durable = <String>[];
+    List<ReadableLogRecord> unspooled = records;
+    List<String> unspooledIds = delivered;
+    if (spool != null && records.isNotEmpty) {
+      if (await spool.enqueue(
+        records,
+        evictLast: true,
+        displaceCrashReports: false,
+        reportIds: delivered,
+      )) {
+        durable.addAll(delivered);
+        unspooled = <ReadableLogRecord>[];
+        unspooledIds = <String>[];
+      } else if (records.length > 1) {
+        // The whole batch was refused, which with a cap can mean only that the
+        // reports together are too many or too big. Each report is its own
+        // batch then, newest first and never at the cost of a crash report
+        // already on disk (its platform copy is gone), so the newest that fit
+        // are durable and the rest stay with the platform. A report that is
+        // over the cap on its own takes the direct path below.
+        unspooled = <ReadableLogRecord>[];
+        unspooledIds = <String>[];
+        // Newest first, so that when the spool cannot hold every report it is
+        // the newest that are made durable. `delivered` and `records` are in
+        // the platform's order and share indices; the sort is stable.
+        final List<int> newestFirst =
+            <int>[for (int i = 0; i < records.length; i++) i]
+              ..sort((int a, int b) {
+                final int byTime = timestamps[b].compareTo(timestamps[a]);
+                return byTime != 0 ? byTime : a.compareTo(b);
+              });
+        for (final int i in newestFirst) {
+          if (await spool.enqueue(
+            <ReadableLogRecord>[records[i]],
+            evictLast: true,
+            displaceCrashReports: false,
+            reportIds: <String>[delivered[i]],
+          )) {
+            durable.add(delivered[i]);
+          } else {
+            unspooled.add(records[i]);
+            unspooledIds.add(delivered[i]);
+          }
+        }
+      }
+    }
+    if (spool != null && durable.isNotEmpty) {
+      // Acknowledge only what is still on disk. Something else writing to the
+      // spool may have evicted a file since it was made durable, and the
+      // platform's copy is then the only one that report has left: it is sent
+      // directly below, and released once the collector has taken it.
+      final Set<String> held = await spool.handledReports();
+      for (int i = durable.length - 1; i >= 0; i--) {
+        if (held.contains(durable[i])) continue;
+        final int at = delivered.indexOf(durable[i]);
+        unspooled.add(records[at]);
+        unspooledIds.add(durable[i]);
+        durable.removeAt(i);
+      }
+    }
     if (spool != null) {
-      final List<String> ids = <String>[
-        if (durable) ...delivered,
-        ...alreadyDurable,
-      ];
+      // In the order the platform listed them, however they were spooled.
+      final Map<String, int> listed = <String, int>{
+        for (int i = 0; i < reports.length; i++) reports[i].id: i,
+      };
+      final List<String> ids = <String>[...durable, ...alreadyDurable]
+        ..sort((String a, String b) => listed[a]!.compareTo(listed[b]!));
       if (ids.isNotEmpty && await _acknowledge(ids)) {
         await spool.forgetHandled(ids);
       }
     }
-    if (durable) return records.length;
-
-    if (records.isEmpty) return 0;
-
-    late final Future<void> export;
-    export = _exportThenAcknowledge(
-      records,
-      delivered,
-    ).whenComplete(() => _background.remove(export));
-    _background.add(export);
+    if (unspooled.isNotEmpty) {
+      late final Future<void> export;
+      export = _exportThenAcknowledge(
+        unspooled,
+        unspooledIds,
+      ).whenComplete(() => _background.remove(export));
+      _background.add(export);
+    }
     return records.length;
   }
 

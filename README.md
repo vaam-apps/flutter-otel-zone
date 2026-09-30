@@ -252,9 +252,31 @@ failure of `start()` does. The snippet above is compiled by
   it is therefore never dropped by count, and `spoolMaxAge` is its bound.
   Failed live sends never count on their own, only a later replay does.
 - **Bounded.** `spoolMaxBatches` (default 32) evicts the oldest file past the
-  cap, ordinary batches before crash reports, and `spoolMaxAge` (default 7
-  days) drops files past their age whatever they hold; a phone that never
-  reconnects must not fill its disk with telemetry nobody collected.
+  cap, ordinary batches before crash reports, `spoolMaxBytes` (default 5 MiB,
+  `null` for none) does the same for the bytes the files occupy on disk, and
+  `spoolMaxAge` (default 7 days) drops files past their age whatever they
+  hold; a phone that never reconnects must not fill its disk with telemetry
+  nobody collected. The count alone is not a size bound: a file is a whole
+  export batch of up to 512 records and a record's size is not capped. The
+  byte cap is checked after every write and when `start()` replays, so a
+  directory an older release left over it is trimmed on the next launch. A
+  single batch larger than the cap is not spooled, with one warning on the
+  talker, and evicts nothing; it is still sent to the collector.
+  Every batch is written before it is sent, and the cap is checked against
+  that file, so the room for undelivered backlog is about the cap minus the
+  largest batch in flight: a live export can evict an older undelivered batch
+  while the collector is healthy. A crash report dropped by any of the three
+  caps is warned about, and taken off the crash journal so the platform offers
+  it again; an ordinary batch goes silently.
+  A recovered crash report is acknowledged only once it is on disk or the
+  collector has taken it. The pending reports are spooled together; if that is
+  refused, each is spooled on its own, newest first, and never by evicting a
+  crash report already on disk (that one was acknowledged, so the file is its
+  only copy). One that does not fit, or is over the byte cap by itself, is sent
+  directly and stays with the platform, and is offered again on the next
+  launch, until the collector has taken it. If the same reports recur over the
+  cap, the newest that fit stay durable and the rest stay with the platform,
+  bounded by its own store, and never block newer ones.
 - **Failure is not fatal.** An unwritable directory sends the batch straight
   to the collector, as if there were no spool, and nothing is thrown into the
   app.
@@ -326,9 +348,10 @@ crash, though nothing died.
   Acknowledging on durability means the spool's limits then apply to the
   report, and the file may be the only copy. They are narrow: being offline is
   never counted against it, a file is dropped by count only when the collector
-  is accepting other batches and refusing this one, `spoolMaxBatches` evicts
-  every ordinary batch before a crash report, and `spoolMaxAge` is the one
-  unconditional bound.
+  is accepting other batches and refusing this one, `spoolMaxBatches` and
+  `spoolMaxBytes` evict every ordinary batch before a crash report (and a crash
+  report only when crash reports alone exceed the cap, which the drain's own
+  writes never cause), and `spoolMaxAge` is the one unconditional bound.
 - **The exported record is redacted.** `redact` is applied to the message, the
   stack trace and the attributes, because a native stack is the densest PII the
   package ever handles. A redactor that throws drops the report rather than

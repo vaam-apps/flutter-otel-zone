@@ -59,6 +59,8 @@ ReadableLogRecord _record({
   );
 }
 
+int _byName(File a, File b) => a.path.compareTo(b.path);
+
 List<File> _spoolFiles(Directory directory) =>
     directory.listSync().whereType<File>().toList();
 
@@ -887,6 +889,401 @@ void main() {
       ).map((File f) => f.readAsStringSync()).toList();
       expect(kept, hasLength(1));
       expect(kept.single, contains('fresh'));
+    });
+  });
+  group('byte cap', () {
+    // Every batch is the same size to the byte: same-length tag, same-length
+    // padding, and no timestamps. `_size` measures it rather than guessing, so
+    // the caps below say "room for two files" and not a magic number.
+    ReadableLogRecord batch(String tag, {int padding = 2000}) =>
+        _record(body: '$tag${'x' * padding}');
+
+    late int size;
+    late List<String> warnings;
+
+    SpoolingLogRecordExporter capped({
+      required int files,
+      int maxBatches = 32,
+      Duration? maxAge,
+      bool nullCap = false,
+    }) => SpoolingLogRecordExporter(
+      delegate: delegate,
+      directory: directory,
+      maxBatches: maxBatches,
+      maxAge: maxAge,
+      // Room for `files` files and a little over, never enough for one more.
+      maxBytes: nullCap ? null : size * files + size ~/ 2,
+      onWarning: warnings.add,
+    );
+
+    String contents() => (_spoolFiles(
+      directory,
+    )..sort(_byName)).map((File f) => f.readAsStringSync()).join('\n');
+
+    setUp(() async {
+      warnings = <String>[];
+      final Directory probeDirectory = await Directory.systemTemp.createTemp(
+        'otel_zone_size',
+      );
+      final SpoolingLogRecordExporter probe = SpoolingLogRecordExporter(
+        delegate: delegate,
+        directory: probeDirectory,
+        maxAge: null,
+        maxBytes: null,
+      );
+      await probe.export(<ReadableLogRecord>[batch('aa')]);
+      size = _spoolFiles(probeDirectory).single.lengthSync();
+      await probeDirectory.delete(recursive: true);
+    });
+
+    test('evicts the oldest ordinary batch first', () async {
+      final SpoolingLogRecordExporter subject = capped(files: 2);
+
+      for (final String tag in <String>['a1', 'b2', 'c3']) {
+        await subject.export(<ReadableLogRecord>[batch(tag)]);
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(_spoolFiles(directory), hasLength(2));
+      expect(contents(), isNot(contains('a1x')));
+      expect(contents(), contains('b2x'));
+      expect(contents(), contains('c3x'));
+    });
+
+    test('keeps a crash report while an ordinary batch remains', () async {
+      final SpoolingLogRecordExporter subject = capped(files: 2);
+
+      // The oldest file, and the only one marked.
+      await subject.enqueue(<ReadableLogRecord>[batch('cr')], evictLast: true);
+      await subject.settled();
+      for (final String tag in <String>['a1', 'b2']) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        await subject.export(<ReadableLogRecord>[batch(tag)]);
+      }
+
+      expect(_spoolFiles(directory), hasLength(2));
+      expect(contents(), contains('crx'));
+      expect(contents(), isNot(contains('a1x')));
+      expect(contents(), contains('b2x'));
+    });
+
+    test('evicts the oldest crash report once crash reports alone exceed '
+        'it', () async {
+      final SpoolingLogRecordExporter subject = capped(files: 2);
+
+      for (final String tag in <String>['c1', 'c2', 'c3']) {
+        await subject.enqueue(<ReadableLogRecord>[batch(tag)], evictLast: true);
+        await subject.settled();
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(_spoolFiles(directory), hasLength(2));
+      expect(contents(), isNot(contains('c1x')));
+      expect(contents(), contains('c2x'));
+      expect(contents(), contains('c3x'));
+    });
+
+    test('a single batch larger than the cap is not spooled, warns once and '
+        'evicts nothing', () async {
+      final SpoolingLogRecordExporter subject = capped(files: 2);
+      await subject.enqueue(<ReadableLogRecord>[batch('cr')], evictLast: true);
+      await subject.settled();
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      await subject.export(<ReadableLogRecord>[batch('a1')]);
+      final String before = contents();
+
+      await subject.export(<ReadableLogRecord>[batch('big', padding: 20000)]);
+      final bool enqueued = await subject.enqueue(<ReadableLogRecord>[
+        batch('big', padding: 20000),
+      ]);
+      await subject.settled();
+
+      expect(enqueued, isFalse, reason: 'the caller still owns it');
+      expect(contents(), before);
+      expect(directory.listSync(), hasLength(2), reason: 'and no temp file');
+      // The export warns, once, with counts only and never the body; the
+      // refused `enqueue` does not repeat it, because its caller owns the
+      // batch and reports whatever it does next.
+      expect(warnings, hasLength(1));
+      expect(warnings.first, contains('spoolMaxBytes'));
+      expect(warnings.first, isNot(contains('xxxx')));
+    });
+
+    test('null is no byte cap', () async {
+      final SpoolingLogRecordExporter subject = capped(files: 1, nullCap: true);
+
+      for (final String tag in <String>['a1', 'b2', 'c3']) {
+        await subject.export(<ReadableLogRecord>[batch(tag, padding: 20000)]);
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(_spoolFiles(directory), hasLength(3));
+      expect(warnings, isEmpty);
+    });
+
+    test(
+      'is enforced at replay for a directory already over the cap',
+      () async {
+        // What an older release, with no byte cap, could have left behind.
+        final SpoolingLogRecordExporter older = capped(files: 1, nullCap: true);
+        await older.enqueue(<ReadableLogRecord>[batch('cr')], evictLast: true);
+        await older.settled();
+        for (final String tag in <String>['a1', 'b2', 'c3']) {
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+          await older.export(<ReadableLogRecord>[batch(tag)]);
+        }
+        expect(_spoolFiles(directory), hasLength(4));
+
+        // What `older` tried live is not what replay sends.
+        delegate.batches.clear();
+        final SpoolingLogRecordExporter subject = capped(files: 2);
+        await subject.replay();
+
+        expect(_spoolFiles(directory), hasLength(2));
+        expect(contents(), contains('crx'));
+        expect(contents(), contains('c3x'));
+        // Evicted before it was tried, so the radio never carried a batch the
+        // cap had already condemned.
+        final String sent = delegate.batches
+            .expand((List<ReadableLogRecord> b) => b)
+            .map((ReadableLogRecord r) => '${r.body}')
+            .join('\n');
+        expect(sent, isNot(contains('a1x')));
+        expect(sent, isNot(contains('b2x')));
+      },
+    );
+
+    test('counts spool files only, never the journal or a temp file', () async {
+      await File(
+        '${directory.path}/handled-reports.json',
+      ).writeAsString('["${'r' * (size * 4)}"]');
+      final SpoolingLogRecordExporter subject = capped(files: 2);
+
+      for (final String tag in <String>['a1', 'b2']) {
+        await subject.export(<ReadableLogRecord>[batch(tag)]);
+      }
+
+      expect(
+        _spoolFiles(
+          directory,
+        ).where((File f) => f.path.endsWith('.spool.json')),
+        hasLength(2),
+      );
+    });
+
+    test('is enforced after each write, before the network answers', () async {
+      // A collector that never answers, so `_evict`, which runs when a
+      // delivery fails, never happens: only the check after the write can
+      // keep the spool under the cap.
+      delegate.hold = Completer<void>().future;
+      final SpoolingLogRecordExporter subject = capped(files: 2);
+
+      for (final String tag in <String>['a1', 'b2', 'c3']) {
+        expect(await subject.enqueue(<ReadableLogRecord>[batch(tag)]), isTrue);
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(_spoolFiles(directory), hasLength(2));
+      expect(contents(), isNot(contains('a1x')));
+    });
+
+    test('evicting a crash report warns, and takes its reports off the '
+        'journal so the platform hands them over again', () async {
+      final SpoolingLogRecordExporter subject = capped(files: 1);
+
+      for (final String tag in <String>['c1', 'c2']) {
+        await subject.enqueue(
+          <ReadableLogRecord>[batch(tag)],
+          evictLast: true,
+          reportIds: <String>['report-$tag'],
+        );
+        await subject.settled();
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(contents(), isNot(contains('c1x')));
+      expect(contents(), contains('c2x'));
+      expect(warnings, hasLength(1));
+      expect(warnings.single, contains('crash report'));
+      expect(warnings.single, contains('report-c1'));
+      // Not `report-c1`: nobody delivered it, so it must not read as handled.
+      expect(await subject.handledReports(), <String>{'report-c2'});
+    });
+
+    test('the count cap evicting a crash report warns and takes its reports '
+        'off the journal too', () async {
+      final SpoolingLogRecordExporter subject = SpoolingLogRecordExporter(
+        delegate: delegate,
+        directory: directory,
+        maxBatches: 1,
+        maxAge: null,
+        onWarning: warnings.add,
+      );
+
+      for (final String tag in <String>['c1', 'c2']) {
+        await subject.enqueue(
+          <ReadableLogRecord>[batch(tag)],
+          evictLast: true,
+          reportIds: <String>['report-$tag'],
+        );
+        await subject.settled();
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(contents(), isNot(contains('c1x')));
+      expect(warnings, hasLength(1));
+      expect(warnings.single, contains('crash report'));
+      expect(warnings.single, contains('report-c1'));
+      expect(warnings.single, contains('spoolMaxBatches'));
+      expect(await subject.handledReports(), <String>{'report-c2'});
+    });
+
+    test('the age cap dropping a crash report warns and takes its reports '
+        'off the journal too', () async {
+      final String staleStamp = DateTime.now()
+          .subtract(const Duration(days: 30))
+          .microsecondsSinceEpoch
+          .toString()
+          .padLeft(16, '0');
+      await File(
+        '${directory.path}/$staleStamp-evict-0-0.spool.json',
+      ).writeAsString(
+        '{"v":1,"resource":{},"records":[{"body":"stale"}],'
+        '"reports":["report-old"]}',
+      );
+      await File(
+        '${directory.path}/handled-reports.json',
+      ).writeAsString('["report-old"]');
+      final SpoolingLogRecordExporter subject = capped(
+        files: 2,
+        maxAge: const Duration(days: 7),
+      );
+
+      await subject.export(<ReadableLogRecord>[batch('a1')]);
+
+      expect(contents(), isNot(contains('stale')));
+      expect(warnings, hasLength(1));
+      expect(warnings.single, contains('report-old'));
+      expect(await subject.handledReports(), isEmpty);
+    });
+
+    test('a crash batch that may not displace crash reports is refused, not '
+        'written, when the spool is full of them', () async {
+      final SpoolingLogRecordExporter subject = capped(files: 1);
+      await subject.enqueue(
+        <ReadableLogRecord>[batch('c1')],
+        evictLast: true,
+        reportIds: <String>['report-c1'],
+      );
+      await subject.settled();
+      final String before = contents();
+      warnings.clear();
+
+      final bool byBytes = await subject.enqueue(
+        <ReadableLogRecord>[batch('c2')],
+        evictLast: true,
+        displaceCrashReports: false,
+        reportIds: <String>['report-c2'],
+      );
+
+      expect(byBytes, isFalse);
+      expect(contents(), before);
+      expect(await subject.handledReports(), <String>{'report-c1'});
+      expect(warnings, hasLength(1));
+      expect(warnings.single, contains('report-c2'));
+
+      // Ordinary batches are still the first to go, so they never block it.
+      await subject.export(<ReadableLogRecord>[batch('a1')]);
+      expect(contents(), isNot(contains('a1x')));
+
+      // And the count cap says the same as the byte cap.
+      final SpoolingLogRecordExporter byCount = SpoolingLogRecordExporter(
+        delegate: delegate,
+        directory: directory,
+        maxBatches: 1,
+        maxAge: null,
+        maxBytes: null,
+        onWarning: warnings.add,
+      );
+      expect(
+        await byCount.enqueue(
+          <ReadableLogRecord>[batch('c3')],
+          evictLast: true,
+          displaceCrashReports: false,
+          reportIds: <String>['report-c3'],
+        ),
+        isFalse,
+      );
+      expect(contents(), before);
+    });
+
+    test('an ordinary batch that a full spool evicts at once is a failure, not '
+        'a success, so nothing acknowledges it', () async {
+      final SpoolingLogRecordExporter subject = capped(files: 1);
+      await subject.enqueue(
+        <ReadableLogRecord>[batch('c1')],
+        evictLast: true,
+        reportIds: <String>['report-c1'],
+      );
+      await subject.settled();
+
+      final ExportResult result = await subject.export(<ReadableLogRecord>[
+        batch('a1'),
+      ]);
+
+      expect(result, ExportResult.failure);
+      expect(contents(), contains('c1x'));
+      expect(contents(), isNot(contains('a1x')));
+    });
+
+    test('evicting an ordinary batch is silent', () async {
+      final SpoolingLogRecordExporter subject = capped(files: 1);
+
+      for (final String tag in <String>['a1', 'b2']) {
+        await subject.export(<ReadableLogRecord>[batch(tag)]);
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(warnings, isEmpty);
+    });
+
+    test('works together with the count cap', () async {
+      // Room for three files by bytes, two by count: the count wins.
+      final SpoolingLogRecordExporter subject = capped(files: 3, maxBatches: 2);
+
+      for (final String tag in <String>['a1', 'b2', 'c3']) {
+        await subject.export(<ReadableLogRecord>[batch(tag)]);
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(_spoolFiles(directory), hasLength(2));
+      expect(contents(), isNot(contains('a1x')));
+    });
+
+    test('works together with the age cap', () async {
+      final String staleStamp = DateTime.now()
+          .subtract(const Duration(days: 30))
+          .microsecondsSinceEpoch
+          .toString()
+          .padLeft(16, '0');
+      await File(
+        '${directory.path}/$staleStamp-0.spool.json',
+      ).writeAsString('{"v":1,"resource":{},"records":[{"body":"stale"}]}');
+      // Room for two by bytes; the stale file is dropped by age and, being
+      // tiny, would never have been what the byte cap removed.
+      final SpoolingLogRecordExporter subject = capped(
+        files: 2,
+        maxAge: const Duration(days: 7),
+      );
+
+      for (final String tag in <String>['a1', 'b2', 'c3']) {
+        await subject.export(<ReadableLogRecord>[batch(tag)]);
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(contents(), isNot(contains('stale')));
+      expect(_spoolFiles(directory), hasLength(2));
+      expect(contents(), contains('c3x'));
     });
   });
 }

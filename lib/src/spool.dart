@@ -31,8 +31,20 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   ///
   /// [maxBatches] is the hard cap on spool files; once it is exceeded the
   /// oldest file is evicted. [maxAge] drops files older than it, so a phone
-  /// that never reconnects does not accumulate forever. Both exist because
-  /// the alternative to a bounded spool is unbounded disk use.
+  /// that never reconnects does not accumulate forever. [maxBytes] caps what
+  /// the files add up to on disk, because a count says nothing about size:
+  /// one file is one batch of up to 512 records, and a record's size is not
+  /// capped. All three exist because the alternative to a bounded spool is
+  /// unbounded disk use.
+  ///
+  /// [maxBytes] is the sum of the spool files' sizes on disk, in bytes. The
+  /// journal and temp files are not spool files and are not counted. Past it
+  /// eviction runs in the same order as for [maxBatches]: the oldest ordinary
+  /// file first, and a file written with `evictLast` only once none is left.
+  /// It is enforced after every write and at the start of [replay]. A batch
+  /// that is larger than [maxBytes] on its own is never written, and warns
+  /// once through [onWarning], because writing it would evict everything else,
+  /// crash reports included, and still not fit. `null` means no byte cap.
   ///
   /// [maxAttempts] is how many *counted* failures a file survives before it is
   /// dropped, and is treated as at least 1. A failure is counted only in a
@@ -52,6 +64,7 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
     required this.directory,
     this.maxBatches = 32,
     this.maxAge = const Duration(days: 7),
+    this.maxBytes = 5 * 1024 * 1024,
     this.maxAttempts = 5,
     this.onWarning,
   });
@@ -67,6 +80,9 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
 
   /// The age past which a spool file is discarded, or `null` for no age cap.
   final Duration? maxAge;
+
+  /// The most bytes, on disk, the spool files may hold; `null` for no cap.
+  final int? maxBytes;
 
   /// The counted failures a spool file survives before it is dropped.
   final int maxAttempts;
@@ -137,7 +153,9 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// treat it as delivered: delivery carries on in the background, and a
   /// failure is recorded against the file exactly as it is for [export].
   /// Returns `false` when the batch could not be written, in which case
-  /// nothing has been sent and the caller still owns it.
+  /// nothing has been sent and the caller still owns it. That includes a batch
+  /// larger than [maxBytes] on its own, which is refused without a warning
+  /// here.
   ///
   /// [evictLast] marks the file so the cap on [maxBatches] evicts it only
   /// after every unmarked file. The crash drain sets it: once a report is
@@ -148,6 +166,17 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// the network is still being tried: durable is the promise, delivered is
   /// the aim.
   ///
+  /// [displaceCrashReports] says whether an [evictLast] batch may push another
+  /// crash report out to make room, as the caps otherwise do. With `false` the
+  /// batch is refused instead, before anything is written or evicted, if it
+  /// would only fit that way, and one warning names its [reportIds]. The crash
+  /// drain passes `false`: a report already on disk has been acknowledged, so
+  /// the platform no longer has a copy, while the report being written still
+  /// does. Making room by evicting the one to keep the other would trade a
+  /// report the platform holds for one it does not. Ordinary batches are still
+  /// evicted first, so they never make it refuse. It has no effect when
+  /// [evictLast] is `false`.
+  ///
   /// [reportIds] are the platform reports the batch holds. They are written to
   /// the journal [handledReports] reads once the batch is on disk and before
   /// this returns, so the caller can acknowledge them knowing that a lost
@@ -155,14 +184,20 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   Future<bool> enqueue(
     List<ReadableLogRecord> logRecords, {
     bool evictLast = false,
+    bool displaceCrashReports = true,
     List<String> reportIds = const <String>[],
   }) async {
     if (logRecords.isEmpty) return true;
 
+    // No warning for a batch over `maxBytes`: the caller owns a batch this
+    // refuses, and whatever it falls back to (the crash drain sends it through
+    // `export`) says so, so the refusal is reported once and not twice.
     final _SpoolEntry? entry = await _writeAhead(
       logRecords,
       evictLast: evictLast,
+      displaceCrashReports: displaceCrashReports,
       reportIds: reportIds,
+      warnOversize: false,
     );
     if (entry == null) return false;
     // After the file and before delivery: the file carries the ids until it is
@@ -315,6 +350,9 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// cap every time.
   Future<int> replay() async {
     await _sweepTemps();
+    // A directory an older release left over the cap is trimmed before
+    // anything is sent, so the radio never carries a batch already condemned.
+    await _enforceByteCap();
     final List<File> files = await _oldestFirst();
     int delivered = 0;
     for (int i = 0; i < files.length; i++) {
@@ -398,6 +436,8 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// phone is offline, and only a later [replay], which can check that the
   /// collector works, is in a position to say otherwise. The file simply
   /// stays, and the batch is reported as success because it is durable.
+  /// A batch a cap has already evicted is not durable, and is reported as a
+  /// failure.
   ///
   /// Never throws. Releases the claim on [entry] however it ends.
   Future<ExportResult> _deliver(
@@ -411,7 +451,13 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
         return result;
       }
       await _evict();
-      return ExportResult.success;
+      // Durable is what "success" promises here. A file a cap has already
+      // evicted, its own batch included when crash reports fill the spool,
+      // is neither delivered nor durable, and reporting success for it would
+      // let a caller acknowledge the only copy of a crash report.
+      return await entry.file.exists()
+          ? ExportResult.success
+          : ExportResult.failure;
     } finally {
       _release(entry);
     }
@@ -432,12 +478,14 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
 
   /// Writes [logRecords] to a new spool file and claims it for delivery.
   ///
-  /// Returns `null` when the disk would not take it, with nothing left behind
-  /// and no claim held.
+  /// Returns `null` when the disk would not take it, or when the batch alone
+  /// is larger than [maxBytes], with nothing left behind and no claim held.
   Future<_SpoolEntry?> _writeAhead(
     List<ReadableLogRecord> logRecords, {
     bool evictLast = false,
+    bool displaceCrashReports = true,
     List<String> reportIds = const <String>[],
+    bool warnOversize = true,
   }) async {
     final String micros = DateTime.now().microsecondsSinceEpoch
         .toString()
@@ -446,6 +494,34 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
         ? '$micros-${_SpoolEntry.evictLastMarker}-${_sequence++}'
         : '$micros-${_sequence++}';
     final _SpoolEntry entry = _SpoolEntry(directory, stem, 0);
+    final List<int> encoded = utf8.encode(_encode(logRecords, reportIds));
+    final int? cap = maxBytes;
+    if (cap != null && encoded.length > cap) {
+      // Refused before anything is written or evicted: no file, no temp, and
+      // no claim to release. The caller sees the same `null` as for an
+      // unwritable directory, so `export` still tries the collector and the
+      // crash drain still owns the report.
+      if (warnOversize) {
+        _warn(
+          'Did not spool a log batch of ${logRecords.length} '
+          '${logRecords.length == 1 ? 'record' : 'records'}: '
+          '${encoded.length} bytes is more than spoolMaxBytes ($cap)',
+        );
+      }
+      return null;
+    }
+    if (evictLast &&
+        !displaceCrashReports &&
+        !await _fitsBesideCrashReports(encoded.length)) {
+      _warn(
+        'Did not spool a crash report batch of ${logRecords.length} '
+        '${logRecords.length == 1 ? 'record' : 'records'}: the spool is full '
+        'of crash reports (spoolMaxBatches $maxBatches, spoolMaxBytes '
+        '$maxBytes), so it stays with the platform'
+        '${reportIds.isEmpty ? '' : ': ${reportIds.join(', ')}'}',
+      );
+      return null;
+    }
     // Claimed before the file exists, so `replay` never sees it unowned.
     _delivering.add(stem);
     try {
@@ -460,11 +536,12 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
       // process left behind.
       _writing.add(temp.path);
       try {
-        await temp.writeAsString(_encode(logRecords, reportIds), flush: true);
+        await temp.writeAsBytes(encoded, flush: true);
         await temp.rename(entry.file.path);
       } finally {
         _writing.remove(temp.path);
       }
+      await _enforceByteCap();
       return entry;
     } on Object {
       _delivering.remove(stem);
@@ -509,7 +586,9 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
     }
   }
 
-  /// Enforces the two bounds on the spool: [maxBatches] and [maxAge].
+  /// Enforces the bounds on the spool that a failed delivery can leave
+  /// exceeded: [maxBatches] and [maxAge]. [maxBytes] is not checked here: files
+  /// only get bigger by being written, and [_writeAhead] and [replay] check it.
   ///
   /// Past the count cap the oldest ordinary file goes first, and a file
   /// marked `evictLast` only once none is left — it may be the only copy of
@@ -521,12 +600,8 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
     final List<File> files = await _oldestFirst();
     final int excess = files.length - maxBatches;
     if (excess > 0) {
-      final List<File> ordered = <File>[
-        ...files.where((File f) => !_SpoolEntry.parse(f).evictLast),
-        ...files.where((File f) => _SpoolEntry.parse(f).evictLast),
-      ];
-      for (final File file in ordered.take(excess)) {
-        await _delete(file);
+      for (final File file in _evictionOrder(files).take(excess)) {
+        await _evictFile(file, 'spoolMaxBatches ($maxBatches)');
       }
     }
     final Duration? age = maxAge;
@@ -535,9 +610,97 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
     for (final File file in files) {
       final DateTime? written = _writtenAt(file);
       if (written != null && now.difference(written) > age) {
-        await _delete(file);
+        await _evictFile(file, 'spoolMaxAge ($age)');
       }
     }
+  }
+
+  /// The order files are evicted in: every ordinary one oldest first, then
+  /// every `evictLast` one oldest first. [oldestFirst] must already be sorted.
+  List<File> _evictionOrder(List<File> oldestFirst) => <File>[
+    ...oldestFirst.where((File f) => !_SpoolEntry.parse(f).evictLast),
+    ...oldestFirst.where((File f) => _SpoolEntry.parse(f).evictLast),
+  ];
+
+  /// Evicts until the spool files fit in [maxBytes], oldest ordinary first.
+  ///
+  /// The sizes are read off the files when this runs, not kept as a running
+  /// total. A total would have to agree with a directory that this class does
+  /// not solely own — files an older release wrote, another engine's exporter
+  /// on the same path, a file deleted by a failed rename — and every way of
+  /// drifting is a cap that quietly stops holding. A `stat` per file is cheap
+  /// where it counts: there are at most [maxBatches] of them, and the write
+  /// path already lists the directory. The sizes are read again after each
+  /// eviction, so a file another delivery finished with in the meantime drops
+  /// out of the total and does not cost a second, needless eviction. Only `*.spool.json`
+  /// files are counted; the journal and temp files are not.
+  ///
+  /// Evicting a file marked `evictLast` is a crash report going without its
+  /// delivery, so it says so, and it takes the report ids off the journal: the
+  /// platform must not be told, after a lost acknowledgement, that a report
+  /// nobody delivered is already handled.
+  Future<void> _enforceByteCap() async {
+    final int? cap = maxBytes;
+    if (cap == null) return;
+    final List<File> remaining = _evictionOrder(await _oldestFirst());
+    while (true) {
+      int total = 0;
+      for (final File file in remaining.toList()) {
+        try {
+          total += await file.length();
+        } on Object {
+          // Gone since it was listed — another delivery finished with it.
+          remaining.remove(file);
+        }
+      }
+      if (total <= cap || remaining.isEmpty) return;
+      await _evictFile(remaining.removeAt(0), 'spoolMaxBytes ($maxBytes)');
+    }
+  }
+
+  /// Deletes [file], which a cap named by [reason] has chosen to evict.
+  ///
+  /// One rule for every cap, so they cannot disagree: an ordinary batch goes
+  /// silently, and a crash report goes with a warning and comes off the
+  /// journal. A crash report evicted undelivered must not stay on the journal,
+  /// because after a lost acknowledgement the drain would read that as
+  /// "already handled" and only repeat the acknowledgement, releasing the
+  /// platform's copy of a report nobody delivered. Off the journal, the
+  /// platform offers it again. Only counts and report ids are reported.
+  Future<void> _evictFile(File file, String reason) async {
+    // Already taken by another cap in this pass: nothing to say twice.
+    if (!await file.exists()) return;
+    if (_SpoolEntry.parse(file).evictLast) {
+      final Set<String> reports = await _reportsIn(file);
+      // Off the journal first: a kill in between leaves the file, which still
+      // names its own reports, and never a journal entry for a lost report.
+      if (reports.isNotEmpty) await forgetHandled(reports);
+      _warn(
+        'Evicted a spooled crash report batch to stay under $reason'
+        '${reports.isEmpty ? '' : ': ${reports.join(', ')}'}',
+      );
+    }
+    await _delete(file);
+  }
+
+  /// Whether a batch of [bytes] fits once every ordinary file is evicted and
+  /// no crash report is: the room a crash batch has that does not cost one.
+  Future<bool> _fitsBesideCrashReports(int bytes) async {
+    final List<File> crash = (await _oldestFirst())
+        .where((File f) => _SpoolEntry.parse(f).evictLast)
+        .toList();
+    if (crash.length + 1 > maxBatches) return false;
+    final int? cap = maxBytes;
+    if (cap == null) return true;
+    int total = bytes;
+    for (final File file in crash) {
+      try {
+        total += await file.length();
+      } on Object {
+        // Gone since it was listed.
+      }
+    }
+    return total <= cap;
   }
 
   /// Deletes temp files no live write owns.

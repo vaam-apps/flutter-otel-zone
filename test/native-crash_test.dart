@@ -81,6 +81,41 @@ NativeCrashReport _report({
   );
 }
 
+/// A spool whose crash file is evicted after it was written, as a concurrent
+/// write elsewhere in the process could do, and whose direct path fails.
+class _EvictingSpool extends SpoolingLogRecordExporter {
+  _EvictingSpool({required super.delegate, required super.directory})
+    : super(maxAge: null);
+
+  int exports = 0;
+
+  @override
+  Future<bool> enqueue(
+    List<ReadableLogRecord> logRecords, {
+    bool evictLast = false,
+    bool displaceCrashReports = true,
+    List<String> reportIds = const <String>[],
+  }) async {
+    final bool durable = await super.enqueue(
+      logRecords,
+      evictLast: evictLast,
+      displaceCrashReports: displaceCrashReports,
+      reportIds: reportIds,
+    );
+    for (final File file in directory.listSync().whereType<File>()) {
+      if (file.path.endsWith('.spool.json')) file.deleteSync();
+    }
+    await forgetHandled(reportIds);
+    return durable;
+  }
+
+  @override
+  Future<ExportResult> export(List<ReadableLogRecord> logRecords) async {
+    exports++;
+    return ExportResult.failure;
+  }
+}
+
 void main() {
   setUpAll(() async {
     // `OTel.instrumentationScope` / `OTel.defaultResource` /
@@ -276,6 +311,232 @@ void main() {
         expect(directory.listSync().whereType<File>(), hasLength(1));
       },
     );
+
+    group('with a byte cap smaller than the pending reports together', () {
+      // Each report fits under the cap alone; both do not. What the spool
+      // holds is measured, not guessed, so the cap says "one, not two".
+      Future<int> spooledSize(List<NativeCrashReport> reports) async {
+        final Directory probe = await Directory.systemTemp.createTemp(
+          'otel_zone_probe',
+        );
+        addTearDown(() => probe.delete(recursive: true));
+        final SpoolingLogRecordExporter spool = SpoolingLogRecordExporter(
+          delegate: _RecordingExporter(result: ExportResult.failure),
+          directory: probe,
+          maxAge: null,
+          maxBytes: null,
+        );
+        await drain(_FakeSource(reports), spool).drain();
+        await spool.settled();
+        return probe.listSync().whereType<File>().fold<int>(
+          0,
+          (int sum, File f) => sum + f.lengthSync(),
+        );
+      }
+
+      NativeCrashReport sized(String id, int timestamp, {int padding = 3000}) =>
+          _report(
+            id: id,
+            timestampMicros: timestamp,
+            stacktrace: '#0 ${'x' * padding}',
+          );
+
+      /// The platform's store after `acknowledged` ids were released.
+      List<NativeCrashReport> stillHeld(
+        _FakeSource source,
+        List<NativeCrashReport> all,
+      ) {
+        final Set<String> released = source.acknowledged
+            .expand((List<String> ids) => ids)
+            .toSet();
+        return all
+            .where((NativeCrashReport r) => !released.contains(r.id))
+            .toList();
+      }
+
+      /// Two reports that fit alone but not together, drained once with the
+      /// collector down. Returns what a later launch needs.
+      Future<({NativeCrashReport older, NativeCrashReport newer, int cap})>
+      firstLaunch(
+        _FakeSource Function(List<NativeCrashReport>) sourceFor,
+        List<String> warnings,
+        void Function(_FakeSource) done,
+      ) async {
+        final NativeCrashReport older = sized('old', 1700000000000000);
+        final NativeCrashReport newer = sized('new', 1700000001000000);
+        final int one = await spooledSize(<NativeCrashReport>[older]);
+        final int both = await spooledSize(<NativeCrashReport>[older, newer]);
+        final int cap = one + 50;
+        expect(both, greaterThan(cap), reason: 'the precondition of the case');
+        final SpoolingLogRecordExporter spool = SpoolingLogRecordExporter(
+          delegate: _RecordingExporter(result: ExportResult.failure),
+          directory: directory,
+          maxAge: null,
+          maxBytes: cap,
+          onWarning: warnings.add,
+        );
+        // The platform lists the older one first; the drain goes by time.
+        final _FakeSource source = sourceFor(<NativeCrashReport>[older, newer]);
+        expect(await drain(source, spool).drain(), 2);
+        await spool.settled();
+        done(source);
+        return (older: older, newer: newer, cap: cap);
+      }
+
+      test('the newer report is durable and acknowledged; the older is '
+          'neither, and is offered again by the next drain', () async {
+        final List<String> warnings = <String>[];
+        late _FakeSource source;
+        final launch = await firstLaunch(
+          (List<NativeCrashReport> all) => source = _FakeSource(all),
+          warnings,
+          (_) {},
+        );
+
+        final List<File> files = directory
+            .listSync()
+            .whereType<File>()
+            .toList();
+        expect(files, hasLength(1), reason: 'the newer one is durable');
+        expect(files.single.readAsStringSync(), contains('"new"'));
+        expect(source.acknowledged, <List<String>>[
+          <String>['new'],
+        ], reason: 'and only that one is released');
+        expect(warnings.join('\n'), contains('old'));
+
+        // Next launch: the platform kept the older one, so it offers it again,
+        // and it is not evicting a report that is already acknowledged.
+        final _FakeSource relaunch = _FakeSource(
+          stillHeld(source, <NativeCrashReport>[launch.older, launch.newer]),
+        );
+        expect(relaunch.reports.single.id, 'old');
+        final SpoolingLogRecordExporter spool = SpoolingLogRecordExporter(
+          delegate: _RecordingExporter(result: ExportResult.failure),
+          directory: directory,
+          maxAge: null,
+          maxBytes: launch.cap,
+          onWarning: warnings.add,
+        );
+        final NativeCrashDrain subject = drain(relaunch, spool);
+        await subject.drain();
+        await subject.settled();
+        await spool.settled();
+
+        expect(relaunch.acknowledged, isEmpty);
+        expect(
+          directory.listSync().whereType<File>().single.readAsStringSync(),
+          contains('"new"'),
+        );
+      });
+
+      test('with the collector up the older report is delivered, and only '
+          'then acknowledged', () async {
+        late _FakeSource source;
+        final launch = await firstLaunch(
+          (List<NativeCrashReport> all) => source = _FakeSource(all),
+          <String>[],
+          (_) {},
+        );
+        final _FakeSource relaunch = _FakeSource(
+          stillHeld(source, <NativeCrashReport>[launch.older, launch.newer]),
+        );
+        final _RecordingExporter collector = _RecordingExporter();
+        final SpoolingLogRecordExporter spool = SpoolingLogRecordExporter(
+          delegate: collector,
+          directory: directory,
+          maxAge: null,
+          maxBytes: launch.cap,
+        );
+        final NativeCrashDrain subject = drain(relaunch, spool);
+
+        await subject.drain();
+        await subject.settled();
+        await spool.settled();
+
+        expect(
+          collector.batches.expand((List<ReadableLogRecord> b) => b),
+          hasLength(greaterThanOrEqualTo(1)),
+        );
+        expect(relaunch.acknowledged, <List<String>>[
+          <String>['old'],
+        ]);
+      });
+
+      test(
+        'a report whose file is gone by the time it would be acknowledged '
+        'is sent directly instead, and not acknowledged before that',
+        () async {
+          final _RecordingExporter delegate = _RecordingExporter(
+            result: ExportResult.failure,
+          );
+          final _EvictingSpool spool = _EvictingSpool(
+            delegate: delegate,
+            directory: directory,
+          );
+          final _FakeSource source = _FakeSource(<NativeCrashReport>[
+            _report(),
+          ]);
+          final NativeCrashDrain subject = drain(source, spool);
+
+          expect(await subject.drain(), 1);
+          await subject.settled();
+
+          expect(delegate.batches, isNotEmpty, reason: 'sent directly');
+          expect(source.acknowledged, isEmpty);
+        },
+      );
+
+      test('only a report over the cap by itself takes the direct path, '
+          'and it is not acknowledged until the collector has it', () async {
+        final NativeCrashReport huge = sized(
+          'huge',
+          1700000000000000,
+          padding: 30000,
+        );
+        final NativeCrashReport small = sized(
+          'small',
+          1700000001000000,
+          padding: 300,
+        );
+        final int cap = await spooledSize(<NativeCrashReport>[small]) + 50;
+        expect(await spooledSize(<NativeCrashReport>[huge]), greaterThan(cap));
+
+        final List<String> warnings = <String>[];
+        final _RecordingExporter delegate = _RecordingExporter(
+          result: ExportResult.failure,
+        );
+        final SpoolingLogRecordExporter spool = SpoolingLogRecordExporter(
+          delegate: delegate,
+          directory: directory,
+          maxAge: null,
+          maxBytes: cap,
+          onWarning: warnings.add,
+        );
+        final _FakeSource source = _FakeSource(<NativeCrashReport>[
+          huge,
+          small,
+        ]);
+        final NativeCrashDrain subject = drain(source, spool);
+
+        expect(await subject.drain(), 2);
+        await subject.settled();
+        await spool.settled();
+
+        final List<File> files = directory
+            .listSync()
+            .whereType<File>()
+            .toList();
+        expect(files, hasLength(1));
+        expect(files.single.readAsStringSync(), contains('"small"'));
+        expect(source.acknowledged, <List<String>>[
+          <String>['small'],
+        ], reason: 'the huge one is still the platform\'s copy');
+        expect(
+          warnings.where((String w) => w.contains('spoolMaxBytes')),
+          hasLength(1),
+        );
+      });
+    });
 
     test('the spooled crash batch is marked to be evicted last', () async {
       final SpoolingLogRecordExporter spool = SpoolingLogRecordExporter(
