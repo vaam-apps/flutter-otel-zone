@@ -252,9 +252,16 @@ failure of `start()` does. The snippet above is compiled by
   it is therefore never dropped by count, and `spoolMaxAge` is its bound.
   Failed live sends never count on their own, only a later replay does.
 - **Bounded.** `spoolMaxBatches` (default 32) evicts the oldest file past the
-  cap, ordinary batches before crash reports, and `spoolMaxAge` (default 7
-  days) drops files past their age whatever they hold; a phone that never
-  reconnects must not fill its disk with telemetry nobody collected.
+  cap, ordinary batches before crash reports, `spoolMaxBytes` (default 5 MiB,
+  `null` for none) does the same for the bytes the files occupy on disk, and
+  `spoolMaxAge` (default 7 days) drops files past their age whatever they
+  hold; a phone that never reconnects must not fill its disk with telemetry
+  nobody collected. The count alone is not a size bound: a file is a whole
+  export batch of up to 512 records and a record's size is not capped. The
+  byte cap is checked after every write and when `start()` replays, so a
+  directory an older release left over it is trimmed on the next launch. A
+  single batch larger than the cap is not spooled, with one warning on the
+  talker, and evicts nothing; it is still sent to the collector.
 - **Failure is not fatal.** An unwritable directory sends the batch straight
   to the collector, as if there were no spool, and nothing is thrown into the
   app.
@@ -326,9 +333,10 @@ crash, though nothing died.
   Acknowledging on durability means the spool's limits then apply to the
   report, and the file may be the only copy. They are narrow: being offline is
   never counted against it, a file is dropped by count only when the collector
-  is accepting other batches and refusing this one, `spoolMaxBatches` evicts
-  every ordinary batch before a crash report, and `spoolMaxAge` is the one
-  unconditional bound.
+  is accepting other batches and refusing this one, `spoolMaxBatches` and
+  `spoolMaxBytes` evict every ordinary batch before a crash report (and a crash
+  report only when crash reports alone exceed the cap), and `spoolMaxAge` is
+  the one unconditional bound.
 - **The exported record is redacted.** `redact` is applied to the message, the
   stack trace and the attributes, because a native stack is the densest PII the
   package ever handles. A redactor that throws drops the report rather than

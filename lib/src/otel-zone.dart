@@ -172,6 +172,7 @@ class OtelZone {
           directory: await spoolDirectory(),
           maxBatches: config.spoolMaxBatches,
           maxAge: config.spoolMaxAge,
+          maxBytes: config.spoolMaxBytes,
           maxAttempts: config.spoolMaxAttempts,
           onWarning: talker.warning,
         );

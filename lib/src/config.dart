@@ -76,6 +76,7 @@ final class OtelZoneConfig {
     this.spoolDirectory,
     this.spoolMaxBatches = 32,
     this.spoolMaxAge = const Duration(days: 7),
+    this.spoolMaxBytes = 5 * 1024 * 1024,
     this.spoolMaxAttempts = 5,
     bool? secure,
   }) : _loggerName = loggerName,
@@ -232,6 +233,27 @@ final class OtelZoneConfig {
 
   /// The age past which a spool file is discarded, or `null` for no age cap.
   final Duration? spoolMaxAge;
+
+  /// The most bytes, on disk, the spool files may hold together, or `null` for
+  /// no byte cap. Defaults to 5 MiB (`5 * 1024 * 1024`).
+  ///
+  /// [spoolMaxBatches] bounds how many files there are, not how big they are:
+  /// one file is one refused export batch of up to 512 log records, and a
+  /// record's size is not capped, so the count alone allows an unbounded
+  /// number of bytes. This is the bound on the bytes. The unit is bytes as the
+  /// files occupy on disk (their length), not records or batches; the journal
+  /// of handled crash reports and half-written temp files are not counted.
+  ///
+  /// Past it the oldest ordinary batch is evicted first, and a crash report
+  /// only once no ordinary batch is left, oldest first — the same order as
+  /// [spoolMaxBatches]. It is enforced after every write and when
+  /// [OtelZone.start] replays, so a directory an older release left over the
+  /// cap is trimmed on the next launch. A single batch larger than the cap is
+  /// not spooled at all, with one warning on the talker: writing it would
+  /// evict everything else, crash reports included, and still not fit. It is
+  /// still sent to the collector. A cap below the size of one batch therefore
+  /// turns spooling off in effect.
+  final int? spoolMaxBytes;
 
   /// How many counted failures a spooled batch survives before it is
   /// dropped, with one warning, so it stops standing in front of the batches

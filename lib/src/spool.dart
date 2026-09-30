@@ -31,8 +31,20 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   ///
   /// [maxBatches] is the hard cap on spool files; once it is exceeded the
   /// oldest file is evicted. [maxAge] drops files older than it, so a phone
-  /// that never reconnects does not accumulate forever. Both exist because
-  /// the alternative to a bounded spool is unbounded disk use.
+  /// that never reconnects does not accumulate forever. [maxBytes] caps what
+  /// the files add up to on disk, because a count says nothing about size:
+  /// one file is one batch of up to 512 records, and a record's size is not
+  /// capped. All three exist because the alternative to a bounded spool is
+  /// unbounded disk use.
+  ///
+  /// [maxBytes] is the sum of the spool files' sizes on disk, in bytes. The
+  /// journal and temp files are not spool files and are not counted. Past it
+  /// eviction runs in the same order as for [maxBatches]: the oldest ordinary
+  /// file first, and a file written with `evictLast` only once none is left.
+  /// It is enforced after every write and at the start of [replay]. A batch
+  /// that is larger than [maxBytes] on its own is never written, and warns
+  /// once through [onWarning], because writing it would evict everything else,
+  /// crash reports included, and still not fit. `null` means no byte cap.
   ///
   /// [maxAttempts] is how many *counted* failures a file survives before it is
   /// dropped, and is treated as at least 1. A failure is counted only in a
@@ -52,6 +64,7 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
     required this.directory,
     this.maxBatches = 32,
     this.maxAge = const Duration(days: 7),
+    this.maxBytes = 5 * 1024 * 1024,
     this.maxAttempts = 5,
     this.onWarning,
   });
@@ -67,6 +80,9 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
 
   /// The age past which a spool file is discarded, or `null` for no age cap.
   final Duration? maxAge;
+
+  /// The most bytes, on disk, the spool files may hold; `null` for no cap.
+  final int? maxBytes;
 
   /// The counted failures a spool file survives before it is dropped.
   final int maxAttempts;
@@ -315,6 +331,9 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// cap every time.
   Future<int> replay() async {
     await _sweepTemps();
+    // A directory an older release left over the cap is trimmed before
+    // anything is sent, so the radio never carries a batch already condemned.
+    await _enforceByteCap();
     final List<File> files = await _oldestFirst();
     int delivered = 0;
     for (int i = 0; i < files.length; i++) {
@@ -432,8 +451,8 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
 
   /// Writes [logRecords] to a new spool file and claims it for delivery.
   ///
-  /// Returns `null` when the disk would not take it, with nothing left behind
-  /// and no claim held.
+  /// Returns `null` when the disk would not take it, or when the batch alone
+  /// is larger than [maxBytes], with nothing left behind and no claim held.
   Future<_SpoolEntry?> _writeAhead(
     List<ReadableLogRecord> logRecords, {
     bool evictLast = false,
@@ -446,6 +465,20 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
         ? '$micros-${_SpoolEntry.evictLastMarker}-${_sequence++}'
         : '$micros-${_sequence++}';
     final _SpoolEntry entry = _SpoolEntry(directory, stem, 0);
+    final List<int> encoded = utf8.encode(_encode(logRecords, reportIds));
+    final int? cap = maxBytes;
+    if (cap != null && encoded.length > cap) {
+      // Refused before anything is written or evicted: no file, no temp, and
+      // no claim to release. The caller sees the same `null` as for an
+      // unwritable directory, so `export` still tries the collector and the
+      // crash drain still owns the report.
+      _warn(
+        'Did not spool a log batch of ${logRecords.length} '
+        '${logRecords.length == 1 ? 'record' : 'records'}: '
+        '${encoded.length} bytes is more than spoolMaxBytes ($cap)',
+      );
+      return null;
+    }
     // Claimed before the file exists, so `replay` never sees it unowned.
     _delivering.add(stem);
     try {
@@ -460,11 +493,12 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
       // process left behind.
       _writing.add(temp.path);
       try {
-        await temp.writeAsString(_encode(logRecords, reportIds), flush: true);
+        await temp.writeAsBytes(encoded, flush: true);
         await temp.rename(entry.file.path);
       } finally {
         _writing.remove(temp.path);
       }
+      await _enforceByteCap();
       return entry;
     } on Object {
       _delivering.remove(stem);
@@ -509,26 +543,24 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
     }
   }
 
-  /// Enforces the two bounds on the spool: [maxBatches] and [maxAge].
+  /// Enforces the bounds on the spool: [maxBatches], [maxBytes] and [maxAge].
   ///
   /// Past the count cap the oldest ordinary file goes first, and a file
   /// marked `evictLast` only once none is left — it may be the only copy of
-  /// an acknowledged crash report. The age cap has no such preference: it is
-  /// the one bound that is unconditional, so a phone that never reconnects
-  /// still cannot keep anything forever.
+  /// an acknowledged crash report. The byte cap follows the same order, over
+  /// what the count cap left. The age cap has no such preference: it is the
+  /// one bound that is unconditional, so a phone that never reconnects still
+  /// cannot keep anything forever.
   Future<void> _evict() async {
     await _sweepTemps();
     final List<File> files = await _oldestFirst();
     final int excess = files.length - maxBatches;
     if (excess > 0) {
-      final List<File> ordered = <File>[
-        ...files.where((File f) => !_SpoolEntry.parse(f).evictLast),
-        ...files.where((File f) => _SpoolEntry.parse(f).evictLast),
-      ];
-      for (final File file in ordered.take(excess)) {
+      for (final File file in _evictionOrder(files).take(excess)) {
         await _delete(file);
       }
     }
+    await _enforceByteCap(excess > 0 ? await _oldestFirst() : files);
     final Duration? age = maxAge;
     if (age == null) return;
     final DateTime now = DateTime.now();
@@ -537,6 +569,48 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
       if (written != null && now.difference(written) > age) {
         await _delete(file);
       }
+    }
+  }
+
+  /// The order files are evicted in: every ordinary one oldest first, then
+  /// every `evictLast` one oldest first. [oldestFirst] must already be sorted.
+  List<File> _evictionOrder(List<File> oldestFirst) => <File>[
+    ...oldestFirst.where((File f) => !_SpoolEntry.parse(f).evictLast),
+    ...oldestFirst.where((File f) => _SpoolEntry.parse(f).evictLast),
+  ];
+
+  /// Evicts until the spool files fit in [maxBytes], oldest ordinary first.
+  ///
+  /// The sizes are read off the files when this runs, not kept as a running
+  /// total. A total would have to agree with a directory that this class does
+  /// not solely own — files an older release wrote, another engine's exporter
+  /// on the same path, a file deleted by a failed rename — and every way of
+  /// drifting is a cap that quietly stops holding. A `stat` per file is cheap
+  /// where it counts: there are at most [maxBatches] of them, and the write
+  /// path already lists the directory. [files] may be passed by a caller that
+  /// has just listed it. Only `*.spool.json` files are counted; the journal
+  /// and temp files are not.
+  Future<void> _enforceByteCap([List<File>? files]) async {
+    final int? cap = maxBytes;
+    if (cap == null) return;
+    final List<File> spooled = files ?? await _oldestFirst();
+    final Map<String, int> sizes = <String, int>{};
+    int total = 0;
+    for (final File file in spooled) {
+      try {
+        final int size = await file.length();
+        sizes[file.path] = size;
+        total += size;
+      } on Object {
+        // Gone since it was listed — another delivery finished with it.
+      }
+    }
+    for (final File file in _evictionOrder(spooled)) {
+      if (total <= cap) return;
+      final int? size = sizes[file.path];
+      if (size == null) continue;
+      await _delete(file);
+      total -= size;
     }
   }
 
