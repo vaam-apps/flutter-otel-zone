@@ -5,6 +5,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otel_zone/otel_zone.dart';
+import 'package:talker/talker.dart';
 
 import 'support/local-collector.dart';
 
@@ -18,8 +19,10 @@ class _FakeCrashSource implements NativeCrashSource {
     ),
   ];
 
+  final List<List<String>> acknowledged = <List<String>>[];
+
   @override
-  Future<void> acknowledge(List<String> ids) async {}
+  Future<void> acknowledge(List<String> ids) async => acknowledged.add(ids);
 }
 
 void main() {
@@ -42,7 +45,7 @@ void main() {
   });
 
   test('a spoolMaxBytes too small for the recovered crash batch leaves the '
-      'spool empty', () async {
+      'spool empty and the report unacknowledged', () async {
     final Directory directory = await Directory.systemTemp.createTemp(
       'otel_zone_max_bytes',
     );
@@ -51,6 +54,7 @@ void main() {
     final LocalCollector collector = await LocalCollector.start(hang: true);
     addTearDown(collector.close);
     final RecordingTalkerObserver sink = RecordingTalkerObserver();
+    final _FakeCrashSource source = _FakeCrashSource();
 
     final OtelZone subject = OtelZone(
       OtelZoneConfig(
@@ -60,7 +64,7 @@ void main() {
         spoolDirectory: () => directory,
         spoolMaxBytes: 1,
       ),
-      nativeCrashSource: _FakeCrashSource(),
+      nativeCrashSource: source,
       sink: sink,
     );
 
@@ -68,5 +72,16 @@ void main() {
 
     expect(subject.isReady, isTrue);
     expect(directory.listSync().whereType<File>(), isEmpty);
+    // Never spooled, and the collector never answered, so the report is still
+    // the platform's copy: acknowledging it would lose it.
+    expect(source.acknowledged, isEmpty);
+    // The oversize refusal is reported once, not once by `enqueue` and once
+    // by the direct export that follows it.
+    expect(
+      sink.records.where(
+        (TalkerData d) => '${d.message}'.contains('spoolMaxBytes'),
+      ),
+      hasLength(1),
+    );
   });
 }

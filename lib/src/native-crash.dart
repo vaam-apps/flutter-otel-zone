@@ -146,8 +146,17 @@ class NativeCrashDrain {
   /// dropped after `spoolMaxAttempts` failures only when the collector is
   /// demonstrably accepting other batches and still refusing this one, with
   /// one warning. The bounds that remain are `spoolMaxAge`, which is
-  /// unconditional, and `spoolMaxBatches`, which evicts every ordinary batch
-  /// before it touches one marked here as a crash report.
+  /// unconditional, `spoolMaxBatches` and `spoolMaxBytes`, which evict every
+  /// ordinary batch before they touch one marked here as a crash report, and a
+  /// crash report evicted that way is warned about and taken off the journal, so
+  /// the platform hands it over again rather than treating it as delivered.
+  ///
+  /// The reports are spooled as one batch. If that is refused, as it is when
+  /// the reports together are larger than `spoolMaxBytes`, each is spooled on
+  /// its own, so one that fits is durable however many others are pending. A
+  /// report that is over `spoolMaxBytes` by itself is not spooled: it is
+  /// exported directly, with one warning, and acknowledged only once the
+  /// collector has taken it, so the platform's copy stays the durable one.
   ///
   /// The acknowledgement is a message to the platform, and the engine that
   /// sends it can be torn down with the message in flight — an activity
@@ -188,7 +197,23 @@ class NativeCrashDrain {
     // acknowledged — its OS record has to stay readable for the next launch.
     final List<String> delivered = <String>[];
     final List<String> alreadyDurable = <String>[];
-    for (final NativeCrashReport report in reports) {
+    // Oldest first, so that when a byte cap cannot hold every report it is
+    // the oldest that goes: the spool evicts by write order. The index keeps
+    // the sort stable for reports that share a timestamp.
+    final List<NativeCrashReport> oldestFirst = <NativeCrashReport>[
+      for (final MapEntry<int, NativeCrashReport> entry
+          in (reports.asMap().entries.toList()..sort((
+            MapEntry<int, NativeCrashReport> a,
+            MapEntry<int, NativeCrashReport> b,
+          ) {
+            final int byTime = a.value.timestampMicros.compareTo(
+              b.value.timestampMicros,
+            );
+            return byTime != 0 ? byTime : a.key.compareTo(b.key);
+          })))
+        entry.value,
+    ];
+    for (final NativeCrashReport report in oldestFirst) {
       if (handled.contains(report.id)) {
         alreadyDurable.add(report.id);
         continue;
@@ -201,33 +226,50 @@ class NativeCrashDrain {
 
     // Durable once it is on disk. A spool that cannot be written leaves the
     // reports with the platform and the plain exporter below.
-    final bool durable =
-        spool != null &&
-        (records.isEmpty ||
-            await spool.enqueue(
-              records,
-              evictLast: true,
-              reportIds: delivered,
-            ));
+    final List<String> durable = <String>[];
+    List<ReadableLogRecord> unspooled = records;
+    List<String> unspooledIds = delivered;
+    if (spool != null && records.isNotEmpty) {
+      if (await spool.enqueue(records, evictLast: true, reportIds: delivered)) {
+        durable.addAll(delivered);
+        unspooled = <ReadableLogRecord>[];
+        unspooledIds = <String>[];
+      } else if (records.length > 1) {
+        // The whole batch was refused, which with a byte cap can mean only that
+        // the reports together are too big. Each report is its own batch then,
+        // so that one that fits is durable however many others are pending,
+        // and only a report that is over the cap on its own takes the direct
+        // path below.
+        unspooled = <ReadableLogRecord>[];
+        unspooledIds = <String>[];
+        for (int i = 0; i < records.length; i++) {
+          if (await spool.enqueue(
+            <ReadableLogRecord>[records[i]],
+            evictLast: true,
+            reportIds: <String>[delivered[i]],
+          )) {
+            durable.add(delivered[i]);
+          } else {
+            unspooled.add(records[i]);
+            unspooledIds.add(delivered[i]);
+          }
+        }
+      }
+    }
     if (spool != null) {
-      final List<String> ids = <String>[
-        if (durable) ...delivered,
-        ...alreadyDurable,
-      ];
+      final List<String> ids = <String>[...durable, ...alreadyDurable];
       if (ids.isNotEmpty && await _acknowledge(ids)) {
         await spool.forgetHandled(ids);
       }
     }
-    if (durable) return records.length;
-
-    if (records.isEmpty) return 0;
-
-    late final Future<void> export;
-    export = _exportThenAcknowledge(
-      records,
-      delivered,
-    ).whenComplete(() => _background.remove(export));
-    _background.add(export);
+    if (unspooled.isNotEmpty) {
+      late final Future<void> export;
+      export = _exportThenAcknowledge(
+        unspooled,
+        unspooledIds,
+      ).whenComplete(() => _background.remove(export));
+      _background.add(export);
+    }
     return records.length;
   }
 

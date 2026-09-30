@@ -253,6 +253,11 @@ final class OtelZoneConfig {
   /// evict everything else, crash reports included, and still not fit. It is
   /// still sent to the collector. A cap below the size of one batch therefore
   /// turns spooling off in effect.
+  ///
+  /// A batch is written before it is sent and the cap is checked against that
+  /// file, so the room for undelivered backlog is about the cap minus the
+  /// largest batch in flight. A crash report evicted by the cap is warned
+  /// about, and taken off the crash journal so the platform offers it again.
   final int? spoolMaxBytes;
 
   /// How many counted failures a spooled batch survives before it is

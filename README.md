@@ -262,6 +262,14 @@ failure of `start()` does. The snippet above is compiled by
   directory an older release left over it is trimmed on the next launch. A
   single batch larger than the cap is not spooled, with one warning on the
   talker, and evicts nothing; it is still sent to the collector.
+  Every batch is written before it is sent, and the cap is checked against
+  that file, so the room for undelivered backlog is about the cap minus the
+  largest batch in flight: a live export can evict an older undelivered batch
+  while the collector is healthy. A crash report evicted by the cap is warned
+  about, and taken off the crash journal so the platform offers it again.
+  Recovered crash reports are spooled together; if that batch is over the cap,
+  each is spooled on its own, and only a report over the cap by itself is sent
+  directly and left with the platform until the collector has taken it.
 - **Failure is not fatal.** An unwritable directory sends the batch straight
   to the collector, as if there were no spool, and nothing is thrown into the
   app.

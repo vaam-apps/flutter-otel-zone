@@ -1001,8 +1001,10 @@ void main() {
       expect(enqueued, isFalse, reason: 'the caller still owns it');
       expect(contents(), before);
       expect(directory.listSync(), hasLength(2), reason: 'and no temp file');
-      // One warning per refused batch, counts only, never the body.
-      expect(warnings, hasLength(2));
+      // The export warns, once, with counts only and never the body; the
+      // refused `enqueue` does not repeat it, because its caller owns the
+      // batch and reports whatever it does next.
+      expect(warnings, hasLength(1));
       expect(warnings.first, contains('spoolMaxBytes'));
       expect(warnings.first, isNot(contains('xxxx')));
     });
@@ -1067,6 +1069,56 @@ void main() {
         ).where((File f) => f.path.endsWith('.spool.json')),
         hasLength(2),
       );
+    });
+
+    test('is enforced after each write, before the network answers', () async {
+      // A collector that never answers, so `_evict`, which runs when a
+      // delivery fails, never happens: only the check after the write can
+      // keep the spool under the cap.
+      delegate.hold = Completer<void>().future;
+      final SpoolingLogRecordExporter subject = capped(files: 2);
+
+      for (final String tag in <String>['a1', 'b2', 'c3']) {
+        expect(await subject.enqueue(<ReadableLogRecord>[batch(tag)]), isTrue);
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(_spoolFiles(directory), hasLength(2));
+      expect(contents(), isNot(contains('a1x')));
+    });
+
+    test('evicting a crash report warns, and takes its reports off the '
+        'journal so the platform hands them over again', () async {
+      final SpoolingLogRecordExporter subject = capped(files: 1);
+
+      for (final String tag in <String>['c1', 'c2']) {
+        await subject.enqueue(
+          <ReadableLogRecord>[batch(tag)],
+          evictLast: true,
+          reportIds: <String>['report-$tag'],
+        );
+        await subject.settled();
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(contents(), isNot(contains('c1x')));
+      expect(contents(), contains('c2x'));
+      expect(warnings, hasLength(1));
+      expect(warnings.single, contains('crash report'));
+      expect(warnings.single, contains('report-c1'));
+      // Not `report-c1`: nobody delivered it, so it must not read as handled.
+      expect(await subject.handledReports(), <String>{'report-c2'});
+    });
+
+    test('evicting an ordinary batch is silent', () async {
+      final SpoolingLogRecordExporter subject = capped(files: 1);
+
+      for (final String tag in <String>['a1', 'b2']) {
+        await subject.export(<ReadableLogRecord>[batch(tag)]);
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(warnings, isEmpty);
     });
 
     test('works together with the count cap', () async {

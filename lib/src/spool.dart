@@ -153,7 +153,9 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// treat it as delivered: delivery carries on in the background, and a
   /// failure is recorded against the file exactly as it is for [export].
   /// Returns `false` when the batch could not be written, in which case
-  /// nothing has been sent and the caller still owns it.
+  /// nothing has been sent and the caller still owns it. That includes a batch
+  /// larger than [maxBytes] on its own, which is refused without a warning
+  /// here.
   ///
   /// [evictLast] marks the file so the cap on [maxBatches] evicts it only
   /// after every unmarked file. The crash drain sets it: once a report is
@@ -175,10 +177,14 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   }) async {
     if (logRecords.isEmpty) return true;
 
+    // No warning for a batch over `maxBytes`: the caller owns a batch this
+    // refuses, and whatever it falls back to (the crash drain sends it through
+    // `export`) says so, so the refusal is reported once and not twice.
     final _SpoolEntry? entry = await _writeAhead(
       logRecords,
       evictLast: evictLast,
       reportIds: reportIds,
+      warnOversize: false,
     );
     if (entry == null) return false;
     // After the file and before delivery: the file carries the ids until it is
@@ -457,6 +463,7 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
     List<ReadableLogRecord> logRecords, {
     bool evictLast = false,
     List<String> reportIds = const <String>[],
+    bool warnOversize = true,
   }) async {
     final String micros = DateTime.now().microsecondsSinceEpoch
         .toString()
@@ -472,11 +479,13 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
       // no claim to release. The caller sees the same `null` as for an
       // unwritable directory, so `export` still tries the collector and the
       // crash drain still owns the report.
-      _warn(
-        'Did not spool a log batch of ${logRecords.length} '
-        '${logRecords.length == 1 ? 'record' : 'records'}: '
-        '${encoded.length} bytes is more than spoolMaxBytes ($cap)',
-      );
+      if (warnOversize) {
+        _warn(
+          'Did not spool a log batch of ${logRecords.length} '
+          '${logRecords.length == 1 ? 'record' : 'records'}: '
+          '${encoded.length} bytes is more than spoolMaxBytes ($cap)',
+        );
+      }
       return null;
     }
     // Claimed before the file exists, so `replay` never sees it unowned.
@@ -543,14 +552,15 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
     }
   }
 
-  /// Enforces the bounds on the spool: [maxBatches], [maxBytes] and [maxAge].
+  /// Enforces the bounds on the spool that a failed delivery can leave
+  /// exceeded: [maxBatches] and [maxAge]. [maxBytes] is not checked here: files
+  /// only get bigger by being written, and [_writeAhead] and [replay] check it.
   ///
   /// Past the count cap the oldest ordinary file goes first, and a file
   /// marked `evictLast` only once none is left — it may be the only copy of
-  /// an acknowledged crash report. The byte cap follows the same order, over
-  /// what the count cap left. The age cap has no such preference: it is the
-  /// one bound that is unconditional, so a phone that never reconnects still
-  /// cannot keep anything forever.
+  /// an acknowledged crash report. The age cap has no such preference: it is
+  /// the one bound that is unconditional, so a phone that never reconnects
+  /// still cannot keep anything forever.
   Future<void> _evict() async {
     await _sweepTemps();
     final List<File> files = await _oldestFirst();
@@ -560,7 +570,6 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
         await _delete(file);
       }
     }
-    await _enforceByteCap(excess > 0 ? await _oldestFirst() : files);
     final Duration? age = maxAge;
     if (age == null) return;
     final DateTime now = DateTime.now();
@@ -587,31 +596,49 @@ class SpoolingLogRecordExporter implements LogRecordExporter {
   /// on the same path, a file deleted by a failed rename — and every way of
   /// drifting is a cap that quietly stops holding. A `stat` per file is cheap
   /// where it counts: there are at most [maxBatches] of them, and the write
-  /// path already lists the directory. [files] may be passed by a caller that
-  /// has just listed it. Only `*.spool.json` files are counted; the journal
-  /// and temp files are not.
-  Future<void> _enforceByteCap([List<File>? files]) async {
+  /// path already lists the directory. The sizes are read again after each
+  /// eviction, so a file another delivery finished with in the meantime drops
+  /// out of the total and does not cost a second, needless eviction. Only `*.spool.json`
+  /// files are counted; the journal and temp files are not.
+  ///
+  /// Evicting a file marked `evictLast` is a crash report going without its
+  /// delivery, so it says so, and it takes the report ids off the journal: the
+  /// platform must not be told, after a lost acknowledgement, that a report
+  /// nobody delivered is already handled.
+  Future<void> _enforceByteCap() async {
     final int? cap = maxBytes;
     if (cap == null) return;
-    final List<File> spooled = files ?? await _oldestFirst();
-    final Map<String, int> sizes = <String, int>{};
-    int total = 0;
-    for (final File file in spooled) {
-      try {
-        final int size = await file.length();
-        sizes[file.path] = size;
-        total += size;
-      } on Object {
-        // Gone since it was listed — another delivery finished with it.
+    final List<File> remaining = _evictionOrder(await _oldestFirst());
+    while (true) {
+      int total = 0;
+      for (final File file in remaining.toList()) {
+        try {
+          total += await file.length();
+        } on Object {
+          // Gone since it was listed — another delivery finished with it.
+          remaining.remove(file);
+        }
       }
+      if (total <= cap || remaining.isEmpty) return;
+      await _evictForBytes(remaining.removeAt(0));
     }
-    for (final File file in _evictionOrder(spooled)) {
-      if (total <= cap) return;
-      final int? size = sizes[file.path];
-      if (size == null) continue;
-      await _delete(file);
-      total -= size;
+  }
+
+  /// Deletes [file] for the byte cap, and accounts for it if it was a crash
+  /// report. Only counts and report ids are ever reported.
+  Future<void> _evictForBytes(File file) async {
+    final _SpoolEntry entry = _SpoolEntry.parse(file);
+    if (entry.evictLast) {
+      final Set<String> reports = await _reportsIn(file);
+      // Off the journal first: a kill in between leaves the file, which still
+      // names its own reports, and never a journal entry for a lost report.
+      if (reports.isNotEmpty) await forgetHandled(reports);
+      _warn(
+        'Evicted a spooled crash report batch to stay under spoolMaxBytes '
+        '($maxBytes)${reports.isEmpty ? '' : ': ${reports.join(', ')}'}',
+      );
     }
+    await _delete(file);
   }
 
   /// Deletes temp files no live write owns.
