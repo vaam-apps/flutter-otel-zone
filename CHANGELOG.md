@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.4.0...v0.5.0) (2026-09-30)
+
+
+### Features
+
+* cap the telemetry spool in bytes with spoolMaxBytes ([#47](https://github.com/vaam-apps/flutter-otel-zone/issues/47)) ([32dd931](https://github.com/vaam-apps/flutter-otel-zone/commit/32dd931f2656856397358ed2c057a625f4df178f))
+
 ## [0.4.0](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.3.1...v0.4.0) (2026-09-29)
 
 
