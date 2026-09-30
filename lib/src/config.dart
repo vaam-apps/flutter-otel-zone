@@ -256,8 +256,9 @@ final class OtelZoneConfig {
   ///
   /// A batch is written before it is sent and the cap is checked against that
   /// file, so the room for undelivered backlog is about the cap minus the
-  /// largest batch in flight. A crash report evicted by the cap is warned
-  /// about, and taken off the crash journal so the platform offers it again.
+  /// largest batch in flight. A crash report dropped by any spool cap is
+  /// warned about, and taken off the crash journal so the platform offers it
+  /// again; recovered crash reports never displace one already on disk.
   final int? spoolMaxBytes;
 
   /// How many counted failures a spooled batch survives before it is

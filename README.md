@@ -265,11 +265,18 @@ failure of `start()` does. The snippet above is compiled by
   Every batch is written before it is sent, and the cap is checked against
   that file, so the room for undelivered backlog is about the cap minus the
   largest batch in flight: a live export can evict an older undelivered batch
-  while the collector is healthy. A crash report evicted by the cap is warned
-  about, and taken off the crash journal so the platform offers it again.
-  Recovered crash reports are spooled together; if that batch is over the cap,
-  each is spooled on its own, and only a report over the cap by itself is sent
-  directly and left with the platform until the collector has taken it.
+  while the collector is healthy. A crash report dropped by any of the three
+  caps is warned about, and taken off the crash journal so the platform offers
+  it again; an ordinary batch goes silently.
+  A recovered crash report is acknowledged only once it is on disk or the
+  collector has taken it. The pending reports are spooled together; if that is
+  refused, each is spooled on its own, newest first, and never by evicting a
+  crash report already on disk (that one was acknowledged, so the file is its
+  only copy). One that does not fit, or is over the byte cap by itself, is sent
+  directly and stays with the platform, and is offered again on the next
+  launch, until the collector has taken it. If the same reports recur over the
+  cap, the newest that fit stay durable and the rest stay with the platform,
+  bounded by its own store, and never block newer ones.
 - **Failure is not fatal.** An unwritable directory sends the batch straight
   to the collector, as if there were no spool, and nothing is thrown into the
   app.
@@ -343,8 +350,8 @@ crash, though nothing died.
   never counted against it, a file is dropped by count only when the collector
   is accepting other batches and refusing this one, `spoolMaxBatches` and
   `spoolMaxBytes` evict every ordinary batch before a crash report (and a crash
-  report only when crash reports alone exceed the cap), and `spoolMaxAge` is
-  the one unconditional bound.
+  report only when crash reports alone exceed the cap, which the drain's own
+  writes never cause), and `spoolMaxAge` is the one unconditional bound.
 - **The exported record is redacted.** `redact` is applied to the message, the
   stack trace and the attributes, because a native stack is the densest PII the
   package ever handles. A redactor that throws drops the report rather than

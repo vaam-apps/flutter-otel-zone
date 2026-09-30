@@ -151,12 +151,19 @@ class NativeCrashDrain {
   /// crash report evicted that way is warned about and taken off the journal, so
   /// the platform hands it over again rather than treating it as delivered.
   ///
-  /// The reports are spooled as one batch. If that is refused, as it is when
-  /// the reports together are larger than `spoolMaxBytes`, each is spooled on
-  /// its own, so one that fits is durable however many others are pending. A
-  /// report that is over `spoolMaxBytes` by itself is not spooled: it is
-  /// exported directly, with one warning, and acknowledged only once the
-  /// collector has taken it, so the platform's copy stays the durable one.
+  /// A report is acknowledged only when it is on disk or the collector has
+  /// taken it, never before. The reports are spooled as one batch. If that is
+  /// refused, as it is when together they are larger than `spoolMaxBytes` or
+  /// more than `spoolMaxBatches`, each is spooled on its own, newest first, and
+  /// never by evicting a crash report that is already on disk: that one has
+  /// been acknowledged, so the file is the only copy it has. A report that does
+  /// not fit that way, or is over `spoolMaxBytes` by itself, is not spooled. It
+  /// is exported directly, and acknowledged only once the collector has taken
+  /// it; until then the platform keeps it and the next drain offers it again.
+  /// Should the same reports recur over the cap every launch, the newest that
+  /// fit stay durable and the rest stay with the platform, delivered when the
+  /// collector answers or bounded by the platform's own store cap; they never
+  /// block newer ones, which are spooled or acknowledged first.
   ///
   /// The acknowledgement is a message to the platform, and the engine that
   /// sends it can be torn down with the message in flight — an activity
@@ -196,24 +203,9 @@ class NativeCrashDrain {
     // dropped rather than exported raw, and a dropped report must not be
     // acknowledged — its OS record has to stay readable for the next launch.
     final List<String> delivered = <String>[];
+    final List<int> timestamps = <int>[];
     final List<String> alreadyDurable = <String>[];
-    // Oldest first, so that when a byte cap cannot hold every report it is
-    // the oldest that goes: the spool evicts by write order. The index keeps
-    // the sort stable for reports that share a timestamp.
-    final List<NativeCrashReport> oldestFirst = <NativeCrashReport>[
-      for (final MapEntry<int, NativeCrashReport> entry
-          in (reports.asMap().entries.toList()..sort((
-            MapEntry<int, NativeCrashReport> a,
-            MapEntry<int, NativeCrashReport> b,
-          ) {
-            final int byTime = a.value.timestampMicros.compareTo(
-              b.value.timestampMicros,
-            );
-            return byTime != 0 ? byTime : a.key.compareTo(b.key);
-          })))
-        entry.value,
-    ];
-    for (final NativeCrashReport report in oldestFirst) {
+    for (final NativeCrashReport report in reports) {
       if (handled.contains(report.id)) {
         alreadyDurable.add(report.id);
         continue;
@@ -222,6 +214,7 @@ class NativeCrashDrain {
       if (record == null) continue;
       records.add(record);
       delivered.add(report.id);
+      timestamps.add(report.timestampMicros);
     }
 
     // Durable once it is on disk. A spool that cannot be written leaves the
@@ -230,22 +223,38 @@ class NativeCrashDrain {
     List<ReadableLogRecord> unspooled = records;
     List<String> unspooledIds = delivered;
     if (spool != null && records.isNotEmpty) {
-      if (await spool.enqueue(records, evictLast: true, reportIds: delivered)) {
+      if (await spool.enqueue(
+        records,
+        evictLast: true,
+        displaceCrashReports: false,
+        reportIds: delivered,
+      )) {
         durable.addAll(delivered);
         unspooled = <ReadableLogRecord>[];
         unspooledIds = <String>[];
       } else if (records.length > 1) {
-        // The whole batch was refused, which with a byte cap can mean only that
-        // the reports together are too big. Each report is its own batch then,
-        // so that one that fits is durable however many others are pending,
-        // and only a report that is over the cap on its own takes the direct
-        // path below.
+        // The whole batch was refused, which with a cap can mean only that the
+        // reports together are too many or too big. Each report is its own
+        // batch then, newest first and never at the cost of a crash report
+        // already on disk (its platform copy is gone), so the newest that fit
+        // are durable and the rest stay with the platform. A report that is
+        // over the cap on its own takes the direct path below.
         unspooled = <ReadableLogRecord>[];
         unspooledIds = <String>[];
-        for (int i = 0; i < records.length; i++) {
+        // Newest first, so that when the spool cannot hold every report it is
+        // the newest that are made durable. `delivered` and `records` are in
+        // the platform's order and share indices; the sort is stable.
+        final List<int> newestFirst =
+            <int>[for (int i = 0; i < records.length; i++) i]
+              ..sort((int a, int b) {
+                final int byTime = timestamps[b].compareTo(timestamps[a]);
+                return byTime != 0 ? byTime : a.compareTo(b);
+              });
+        for (final int i in newestFirst) {
           if (await spool.enqueue(
             <ReadableLogRecord>[records[i]],
             evictLast: true,
+            displaceCrashReports: false,
             reportIds: <String>[delivered[i]],
           )) {
             durable.add(delivered[i]);
@@ -256,8 +265,27 @@ class NativeCrashDrain {
         }
       }
     }
+    if (spool != null && durable.isNotEmpty) {
+      // Acknowledge only what is still on disk. Something else writing to the
+      // spool may have evicted a file since it was made durable, and the
+      // platform's copy is then the only one that report has left: it is sent
+      // directly below, and released once the collector has taken it.
+      final Set<String> held = await spool.handledReports();
+      for (int i = durable.length - 1; i >= 0; i--) {
+        if (held.contains(durable[i])) continue;
+        final int at = delivered.indexOf(durable[i]);
+        unspooled.add(records[at]);
+        unspooledIds.add(durable[i]);
+        durable.removeAt(i);
+      }
+    }
     if (spool != null) {
-      final List<String> ids = <String>[...durable, ...alreadyDurable];
+      // In the order the platform listed them, however they were spooled.
+      final Map<String, int> listed = <String, int>{
+        for (int i = 0; i < reports.length; i++) reports[i].id: i,
+      };
+      final List<String> ids = <String>[...durable, ...alreadyDurable]
+        ..sort((String a, String b) => listed[a]!.compareTo(listed[b]!));
       if (ids.isNotEmpty && await _acknowledge(ids)) {
         await spool.forgetHandled(ids);
       }

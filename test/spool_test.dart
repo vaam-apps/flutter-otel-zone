@@ -1110,6 +1110,132 @@ void main() {
       expect(await subject.handledReports(), <String>{'report-c2'});
     });
 
+    test('the count cap evicting a crash report warns and takes its reports '
+        'off the journal too', () async {
+      final SpoolingLogRecordExporter subject = SpoolingLogRecordExporter(
+        delegate: delegate,
+        directory: directory,
+        maxBatches: 1,
+        maxAge: null,
+        onWarning: warnings.add,
+      );
+
+      for (final String tag in <String>['c1', 'c2']) {
+        await subject.enqueue(
+          <ReadableLogRecord>[batch(tag)],
+          evictLast: true,
+          reportIds: <String>['report-$tag'],
+        );
+        await subject.settled();
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(contents(), isNot(contains('c1x')));
+      expect(warnings, hasLength(1));
+      expect(warnings.single, contains('crash report'));
+      expect(warnings.single, contains('report-c1'));
+      expect(warnings.single, contains('spoolMaxBatches'));
+      expect(await subject.handledReports(), <String>{'report-c2'});
+    });
+
+    test('the age cap dropping a crash report warns and takes its reports '
+        'off the journal too', () async {
+      final String staleStamp = DateTime.now()
+          .subtract(const Duration(days: 30))
+          .microsecondsSinceEpoch
+          .toString()
+          .padLeft(16, '0');
+      await File(
+        '${directory.path}/$staleStamp-evict-0-0.spool.json',
+      ).writeAsString(
+        '{"v":1,"resource":{},"records":[{"body":"stale"}],'
+        '"reports":["report-old"]}',
+      );
+      await File(
+        '${directory.path}/handled-reports.json',
+      ).writeAsString('["report-old"]');
+      final SpoolingLogRecordExporter subject = capped(
+        files: 2,
+        maxAge: const Duration(days: 7),
+      );
+
+      await subject.export(<ReadableLogRecord>[batch('a1')]);
+
+      expect(contents(), isNot(contains('stale')));
+      expect(warnings, hasLength(1));
+      expect(warnings.single, contains('report-old'));
+      expect(await subject.handledReports(), isEmpty);
+    });
+
+    test('a crash batch that may not displace crash reports is refused, not '
+        'written, when the spool is full of them', () async {
+      final SpoolingLogRecordExporter subject = capped(files: 1);
+      await subject.enqueue(
+        <ReadableLogRecord>[batch('c1')],
+        evictLast: true,
+        reportIds: <String>['report-c1'],
+      );
+      await subject.settled();
+      final String before = contents();
+      warnings.clear();
+
+      final bool byBytes = await subject.enqueue(
+        <ReadableLogRecord>[batch('c2')],
+        evictLast: true,
+        displaceCrashReports: false,
+        reportIds: <String>['report-c2'],
+      );
+
+      expect(byBytes, isFalse);
+      expect(contents(), before);
+      expect(await subject.handledReports(), <String>{'report-c1'});
+      expect(warnings, hasLength(1));
+      expect(warnings.single, contains('report-c2'));
+
+      // Ordinary batches are still the first to go, so they never block it.
+      await subject.export(<ReadableLogRecord>[batch('a1')]);
+      expect(contents(), isNot(contains('a1x')));
+
+      // And the count cap says the same as the byte cap.
+      final SpoolingLogRecordExporter byCount = SpoolingLogRecordExporter(
+        delegate: delegate,
+        directory: directory,
+        maxBatches: 1,
+        maxAge: null,
+        maxBytes: null,
+        onWarning: warnings.add,
+      );
+      expect(
+        await byCount.enqueue(
+          <ReadableLogRecord>[batch('c3')],
+          evictLast: true,
+          displaceCrashReports: false,
+          reportIds: <String>['report-c3'],
+        ),
+        isFalse,
+      );
+      expect(contents(), before);
+    });
+
+    test('an ordinary batch that a full spool evicts at once is a failure, not '
+        'a success, so nothing acknowledges it', () async {
+      final SpoolingLogRecordExporter subject = capped(files: 1);
+      await subject.enqueue(
+        <ReadableLogRecord>[batch('c1')],
+        evictLast: true,
+        reportIds: <String>['report-c1'],
+      );
+      await subject.settled();
+
+      final ExportResult result = await subject.export(<ReadableLogRecord>[
+        batch('a1'),
+      ]);
+
+      expect(result, ExportResult.failure);
+      expect(contents(), contains('c1x'));
+      expect(contents(), isNot(contains('a1x')));
+    });
+
     test('evicting an ordinary batch is silent', () async {
       final SpoolingLogRecordExporter subject = capped(files: 1);
 
