@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.5.0...v0.6.0) (2026-10-08)
+
+
+### Features
+
+* setEndUser stamps enduser.id on spans and log records ([#51](https://github.com/vaam-apps/flutter-otel-zone/issues/51)) ([ba4bdbd](https://github.com/vaam-apps/flutter-otel-zone/commit/ba4bdbd58425e162e49c6fdee128c91051d1f24f))
+
+
+### Bug Fixes
+
+* cap dartastic_opentelemetry_api below 1.0.0-rc.4 ([#49](https://github.com/vaam-apps/flutter-otel-zone/issues/49)) ([3269827](https://github.com/vaam-apps/flutter-otel-zone/commit/32698278993253ec034e4a3e8aab3105b5978864))
+
 ## [0.5.0](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.4.0...v0.5.0) (2026-09-30)
 
 
