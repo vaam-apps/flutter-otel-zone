@@ -19,7 +19,16 @@ dependencies:
   # not a downgrade.
   dartastic_opentelemetry: ^1.1.0-beta.15
   # Semantic conventions: `App.appBuildId` for `app.build_id`.
-  dartastic_opentelemetry_api: ^1.0.0-rc.3
+  #
+  # Capped below rc.4, on purpose. rc.4 (2026-10-08) removed members that
+  # `dartastic_opentelemetry` beta.15 still calls (`APISpan.attributes`,
+  # `spanEvents`, `status`, ...), so that pair does not compile. `^1.0.0-rc.3`
+  # does not keep it out: pub resolves this package first, picks the newest
+  # (rc.4), and then settles for beta.15 because beta.16, which carries the
+  # same cap, is the one release that cannot sit beside rc.4. Every fresh
+  # `pub get` — CI's, an app's, the example's — got the broken pair. Lift the
+  # cap when `dartastic_opentelemetry` ships a release built on rc.4.
+  dartastic_opentelemetry_api: '>=1.0.0-rc.3 <1.0.0-rc.4'
   # `Int64`, which the SDK's public log-record API takes and returns for
   # timestamps but does not re-export. Already in the graph via the SDK, so
   # this adds no package an install did not already have.
