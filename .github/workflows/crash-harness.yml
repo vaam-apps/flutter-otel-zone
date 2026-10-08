@@ -45,7 +45,7 @@ env:
   # stalls QEMU about twelve minutes into the API 34 run and takes adb with it,
   # on every run that reached the repeat stage. Bump this only after the
   # harness has passed repeatedly on the new build; the first script line below
-  # fails the step if the emulator that came up is not this one.
+  # fails the step if the emulator installed is not this one.
   EMULATOR_BUILD: "15917651"
 
 jobs:
@@ -145,9 +145,13 @@ jobs:
       #
       # The emulator is pinned (`EMULATOR_BUILD`, above) because the action
       # installs the latest stable one otherwise, and 37.2.12.0 hangs QEMU on
-      # API 34. The first line fails the step if the one running is another
-      # build, and the second logs the system image's revision, so a change in
-      # either is read from the log rather than guessed.
+      # API 34. The first line fails the step if the installed emulator is
+      # another build, and the second logs the system image's revision, so a
+      # change in either is read from the log rather than guessed. The first
+      # reads the SDK's own record of the build instead of running `emulator
+      # -version`, which loads QEMU and fails on this runner for want of
+      # libpulse; the build that boots is the one the emulator's first log line
+      # names.
       #
       # No run is retried: a run that needs a retry is a defect (see #36, where
       # a retry hid a crash exported twice). Two lines exist to measure that
@@ -167,7 +171,7 @@ jobs:
           disable-animations: true
           emulator-build: ${{ env.EMULATOR_BUILD }}
           script: |
-            "$ANDROID_HOME/emulator/emulator" -version | grep -F "build_id $EMULATOR_BUILD"
+            grep -Fx "Pkg.BuildId=$EMULATOR_BUILD" "$ANDROID_HOME/emulator/source.properties"
             grep Pkg.Revision "$ANDROID_HOME/system-images/android-$API_LEVEL/google_apis/x86_64/source.properties"
             dart run tool/android-crash-harness.dart --no-build --kinds jvm,native,anr --log-dir ${{ github.workspace }}/harness-logs/kinds --port ${{ env.OTEL_PORT }}
             dart run tool/android-crash-harness.dart --no-build --kinds jvm,native --upgrade-apk ${{ runner.temp }}/app-1.0.1-2.apk --log-dir ${{ github.workspace }}/harness-logs/upgrade --port ${{ env.OTEL_PORT }}
