@@ -13,6 +13,7 @@ import 'package:talker/talker.dart';
 
 import 'bridge.dart';
 import 'config.dart';
+import 'end-user.dart';
 import 'native-crash.dart';
 import 'otlp-exporter.dart';
 import 'riverpod-arguments.dart';
@@ -107,6 +108,60 @@ class OtelZone {
   /// that failed.
   bool get isReady => bridge.ready;
 
+  String? _endUserId;
+
+  /// The id the next span and the next log record will carry as `enduser.id`,
+  /// or `null` when they will carry none. See [setEndUser].
+  String? get endUserId => _endUserId;
+
+  /// Links every span started and every log record emitted from now on to the
+  /// person [id] names, as the semantic convention's `enduser.id`; `null`
+  /// stops it.
+  ///
+  /// ```dart
+  /// // Signed in, and opted in to being linked:
+  /// observability.setEndUser('cmg2x8k4a0000abcd1234efgh');
+  /// // Signed out, or opted out:
+  /// observability.setEndUser(null);
+  /// ```
+  ///
+  /// **From the next one, and no further back.** A span is stamped as it
+  /// starts and a record as it is emitted. A span already running when this is
+  /// called keeps what it started with (it is neither given the id nor stripped
+  /// of it), and so does every record already emitted, queued or spooled: the
+  /// identity on telemetry is the one that was current when it was made.
+  /// Clearing the id does not recall what was sent.
+  ///
+  /// An empty [id] clears it, since an attribute may not be an empty string.
+  ///
+  /// **The id is exempt from [OtelZoneConfig.redact]**, on spans and on log
+  /// records. It is the one attribute an app decides may leave the device, so a
+  /// redactor that masked it (a long run of digits in a cuid is enough for a
+  /// pattern written for phone numbers) would unlink every span without a
+  /// word. It follows that [id] must be an opaque identifier that is already
+  /// fit to be sent: an account id, never a phone number, an e-mail address or
+  /// a name, which `redact` would otherwise have caught. Every other attribute
+  /// is scrubbed exactly as before.
+  ///
+  /// Recovered native crash reports are not stamped. They describe the
+  /// previous run, and the person signed in now is not necessarily the person
+  /// who was then.
+  ///
+  /// **Never throws, and cheap enough for any call site**: it is one field
+  /// assignment, with no lock and no I/O. The state lives on this object and in
+  /// no `Zone`, so it makes no difference which zone calls it, or from which
+  /// zone a span is later started; the last call wins. Like the rest of Dart's
+  /// state it belongs to the isolate: a background isolate has its own
+  /// [OtelZone] and its own id.
+  ///
+  /// Safe at any time, before [start] included. Until the SDK is up there is
+  /// nothing to stamp and the call has no effect that anything can see; the id
+  /// is kept, and the first span and record after a successful [start] carry
+  /// it. If the SDK never starts, nothing is ever stamped.
+  void setEndUser(String? id) {
+    _endUserId = id == null || id.isEmpty ? null : id;
+  }
+
   /// Brings up the OpenTelemetry SDK and points it at
   /// [OtelZoneConfig.endpoint].
   ///
@@ -194,6 +249,13 @@ class OtelZone {
           ),
         );
       }
+      // The first log processor, so that it runs before the batch processor
+      // queues its clone of each record. `OTel.initialize` builds no logs
+      // pipeline of its own when it is given a processor, so the rest of it is
+      // built below, behind this one. See `EndUserLogRecordProcessor`.
+      final EndUserLogRecordProcessor? endUserLogs = config.enableLogs
+          ? EndUserLogRecordProcessor(() => _endUserId)
+          : null;
       await OTel.initialize(
         serviceName: config.serviceName,
         serviceVersion: serviceVersion,
@@ -203,12 +265,36 @@ class OtelZone {
         enableMetrics: config.enableMetrics,
         spanProcessor: redactingSpans,
         logRecordExporter: spool,
+        logRecordProcessor: endUserLogs,
         resourceAttributes: OTel.attributesFromMap(<String, String>{
           ...resourceAttributes,
           App.appBuildId.key: ?buildId,
           'deployment.environment.name': ?config.deploymentEnvironmentName,
         }),
       );
+      // The logs pipeline `initialize` would have built, by the function it
+      // would have called, with the arguments it would have passed (the
+      // environment supplies the rest, as it does there). `OTEL_SDK_DISABLED`
+      // makes `initialize` skip logs altogether, which leaves the stamper out
+      // of the provider and this with nothing to follow.
+      if (endUserLogs != null &&
+          OTel.loggerProvider().logRecordProcessors.contains(endUserLogs)) {
+        LogsConfiguration.configureLoggerProvider(
+          endpoint: config.endpoint,
+          secure: config.secure,
+          logRecordExporter: spool,
+          resource: OTel.defaultResource,
+        );
+      }
+      // Appended, where the log stamper cannot be: a span is exported when it
+      // ends, after every processor has seen it start, and is not cloned. Only
+      // behind a pipeline that exists: `OTEL_SDK_DISABLED` and
+      // `OTEL_TRACES_EXPORTER=none` build none, and a stamper alone would be a
+      // processor left running for spans nothing exports.
+      final TracerProvider tracers = OTel.tracerProvider();
+      if (tracers.hasSpanProcessors) {
+        tracers.addSpanProcessor(EndUserSpanProcessor(() => _endUserId));
+      }
       // `OTEL_SDK_DISABLED` makes `initialize` skip the trace pipeline, which
       // leaves the processor built above running its timer for nothing.
       final SpanProcessor? unused = redactingSpans;

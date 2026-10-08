@@ -220,6 +220,101 @@ void main() {
     });
   });
 
+  group('enduser.id', () {
+    // The id `OtelZone.setEndUser` stamps. It is exempt from `redact`, and
+    // nothing else is.
+    const String cuid = 'cmg20000000009abcd1234efgh';
+
+    test('a cuid a phone redactor would mask comes through whole', () {
+      // The reason for the exemption, shown first: unexempted, this is what a
+      // pattern written for phone numbers does to a perfectly good id.
+      expect(scrub(cuid), 'cmg<phone>09abcd1234efgh');
+
+      start(
+        'linked',
+        attributes: OTel.attributesFromMap(<String, Object>{
+          'enduser.id': cuid,
+        }),
+      ).end();
+
+      expect(attribute(capture.spans.single, 'enduser.id'), cuid);
+    });
+
+    test('an id made only of digits comes through whole', () {
+      start(
+        'linked',
+        attributes: OTel.attributesFromMap(<String, Object>{
+          'enduser.id': '123456789012',
+        }),
+      ).end();
+
+      expect(attribute(capture.spans.single, 'enduser.id'), '123456789012');
+    });
+
+    test('everything else a span carries is still scrubbed', () {
+      final Span span = start(
+        'linked',
+        attributes: OTel.attributesFromMap(<String, Object>{
+          'enduser.id': cuid,
+          'user.phone': '699887766',
+        }),
+      );
+      span.recordException(StateError('could not reach 699887766'));
+      span.setStatus(SpanStatusCode.Error, 'unreachable 699887766');
+      span.end();
+
+      final Span exported = capture.spans.single;
+      expect(attribute(exported, 'enduser.id'), cuid);
+      expect(attribute(exported, 'user.phone'), '<phone>');
+      expect(exported.statusDescription, 'unreachable <phone>');
+      final SpanEvent event = exported.spanEvents!.single;
+      expect(
+        eventAttribute(event, 'exception.message') as String,
+        isNot(contains('699887766')),
+      );
+    });
+
+    test('only that exact key is exempt', () {
+      // Neighbours in the same namespace, a prefix of it, and a suffix on it.
+      start(
+        'neighbours',
+        attributes: OTel.attributesFromMap(<String, Object>{
+          'enduser.pseudo.id': '699887766',
+          'enduser.id.copy': '699887766',
+          'user.enduser.id': '699887766',
+          'Enduser.id': '699887766',
+          'enduser': '699887766',
+        }),
+      ).end();
+
+      final Span exported = capture.spans.single;
+      for (final String key in <String>[
+        'enduser.pseudo.id',
+        'enduser.id.copy',
+        'user.enduser.id',
+        'Enduser.id',
+        'enduser',
+      ]) {
+        expect(attribute(exported, key), '<phone>', reason: key);
+      }
+    });
+
+    test('a redactor that empties other values still drops only those', () {
+      redactor = (String input) => '';
+      start(
+        'emptied',
+        attributes: OTel.attributesFromMap(<String, Object>{
+          'enduser.id': cuid,
+          'user.name': 'Ada',
+        }),
+      ).end();
+
+      final Span exported = capture.spans.single;
+      expect(attribute(exported, 'enduser.id'), cuid);
+      expect(attribute(exported, 'user.name'), isNull);
+    });
+  });
+
   group('what the view does not hand on', () {
     test('its toString is scrubbed, for the exporters that log `\$spans`', () {
       final Span span = start(
