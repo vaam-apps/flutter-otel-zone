@@ -203,6 +203,75 @@ What it does **not** touch:
 A `redact` that throws drops the record instead of letting it through
 unredacted — it fails closed, and it never throws into the app.
 
+## Linking telemetry to an account
+
+```dart
+observability.setEndUser('cmg2x8k4a0000abcd1234efgh'); // signed in, opted in
+observability.setEndUser(null); // signed out, or opted out
+```
+
+`OtelZone.setEndUser(String? id)` stamps the semantic convention's
+`enduser.id` on every span that starts and every log record that is emitted
+from the next one on, until it is called again. `null` stops it, and so does an
+empty string, because an attribute may not be empty. The package never sets it
+by itself: an app that does not call `setEndUser` exports no `enduser.id`
+anywhere, and whether, when and for whom to call it is the app's decision (a
+consent, a sign-in), not something this package asks.
+
+`endUserId` reads back what the next span and record will carry.
+
+**From the next one, and no further back.** A span is stamped as it starts and
+a record as it is emitted, so the identity on telemetry is the one that was
+current when it was made:
+
+- A span already running when the id is set does not gain it, and one running
+  when it is cleared keeps it. A span that wraps a sign-in, started before it,
+  stays unlinked.
+- Nothing already emitted, queued or spooled is rewritten. Clearing the id
+  stops linking; it does not recall.
+- Recovered native crash reports are not stamped. They describe the previous
+  run, and whoever is signed in now is not necessarily who was then.
+
+**The id is exempt from `redact`.** On a span it is passed through whole while
+every other attribute is scrubbed as before; a log record's is added after the
+bridge has scrubbed the record, so `redact` never meets it. The exemption is
+there because it happens: over 200,000 random ids of each kind, the unanchored
+`\d{9}` used as the example above masks about 1 in 10,000 cuids and 1 in 33
+UUIDs, and an anchored `^\+?\d{9,12}$` masks neither. A masked id unlinks its
+span with nothing to say so. The price is that the exemption trusts the app:
+pass an opaque account id, never a phone number, an e-mail address or a name,
+which is exactly what `redact` would otherwise have caught. Only the exact key
+`enduser.id` is exempt.
+
+**It never throws, and any zone may call it.** It is one field assignment with
+no lock, no timer and no I/O. The id lives on the `OtelZone` and in no `Zone`,
+so it does not matter which zone sets it or which later starts a span; the last
+call wins. It belongs to the isolate, like the rest of Dart's state: a
+background isolate has its own `OtelZone` and its own id.
+
+**It is safe at any time, `start()` included.** Before the SDK is up there is
+nothing to stamp, so the call has no visible effect; the id is kept, and the
+first span and record after a successful `start()` carry it. If the SDK never
+starts, nothing is ever stamped. Stamping itself never throws into the SDK
+either: the SDK calls its processors without awaiting them, and a failure there
+would otherwise be an uncaught error in the app's own handler. It fails towards
+an unlinked span.
+
+How it is wired, because the order is not arbitrary. Spans are stamped by a
+span processor in `onStart`, appended behind the pipeline: a span is exported
+at its end, after every processor has seen it start. Log records are stamped
+by a log processor in `onEmit`, and that one has to be **first**, because the
+batch processor queues a clone of each record and a stamp made after it lands
+on an original nobody exports. `addLogRecordProcessor` only appends, so
+`start()` hands the stamper to `OTel.initialize` and builds the rest of the
+logs pipeline behind it, with the SDK's own `LogsConfiguration` function and
+the arguments `OTel.initialize` would have passed it, so `OTEL_LOGS_EXPORTER`,
+the `OTEL_EXPORTER_OTLP_*` headers and the spool behave as they did.
+
+On sign-out, clear the id *and* the spool (see "Where the spool lives"): a
+batch spooled while the id was set keeps it, and is delivered with it on the
+next launch.
+
 ## Faults recorded offline
 
 A batch the collector refuses is retried in memory and then dropped, and one in

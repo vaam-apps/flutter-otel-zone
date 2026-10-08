@@ -1,6 +1,7 @@
 import 'package:dartastic_opentelemetry/dartastic_opentelemetry.dart';
 
 import 'config.dart';
+import 'end-user.dart';
 import 'otlp-exporter.dart';
 
 /// A [SpanExporter] that hands its delegate a scrubbed copy of every span, so
@@ -14,6 +15,15 @@ import 'otlp-exporter.dart';
 /// Attribute keys, event names and everything that is not text (ids, times,
 /// kind, status code, numbers) are left alone: they are the span's schema, not
 /// data an app put there.
+///
+/// **One attribute is exempt: `enduser.id`.** It is the id `OtelZone.setEndUser`
+/// stamps, put there on purpose by an app that has decided the id may leave the
+/// device, and a redactor that masks it unlinks the span without a word. It
+/// happens: over 200,000 random ids of each kind, an unanchored `\d{9}` (the
+/// README's own example) masked about 1 in 10,000 cuids and 1 in 33 UUIDs, while an
+/// anchored whole-value pattern masked neither. Every other attribute, on a
+/// span, an event or a link, is scrubbed exactly as before, so an app that
+/// hands a phone number to `setEndUser` is the one thing this lets through.
 ///
 /// ## Why an exporter, and why a view
 ///
@@ -301,11 +311,15 @@ final class _ScrubbedScope implements InstrumentationScope {
 /// [attributes] with every string value, and every element of a string-list
 /// value, run through [redact]. A value the redactor empties is dropped,
 /// because an attribute may not be an empty string.
+///
+/// The attribute named [endUserIdKey] is passed through as it is.
 Attributes _scrubAttributes(Attributes attributes, Redactor redact) {
   final List<Attribute<Object>> scrubbed = <Attribute<Object>>[];
   for (final Attribute<Object> attribute in attributes.toList()) {
     final Object value = attribute.value;
-    if (value is String) {
+    if (attribute.key == endUserIdKey) {
+      scrubbed.add(attribute);
+    } else if (value is String) {
       final String text = redact(value);
       if (text.isNotEmpty) {
         scrubbed.add(OTel.attributeString(attribute.key, text));

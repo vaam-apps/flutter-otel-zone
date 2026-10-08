@@ -184,6 +184,33 @@ void main() {
       expect(ran, isFalse);
     });
 
+    test('setEndUser is a safe no-op while the SDK is down', () async {
+      // Never throws, before a start or after a failed one, and leaves the
+      // rest of the zone as it was. The id is held, for a start that follows.
+      final OtelZone subject = zone(
+        const OtelZoneConfig(
+          serviceName: 'test-app',
+          // An empty version fails `OTel.initialize`, without a network.
+          endpoint: 'http://127.0.0.1:4318',
+          useConsoleLogs: false,
+        ),
+      );
+      expect(subject.endUserId, isNull);
+      expect(() => subject.setEndUser('user-1'), returnsNormally);
+      expect(subject.endUserId, 'user-1');
+
+      await subject.start(serviceVersion: '');
+      expect(subject.isReady, isFalse);
+      expect(() => subject.setEndUser('user-2'), returnsNormally);
+      expect(subject.endUserId, 'user-2');
+      expect(() => subject.setEndUser(null), returnsNormally);
+      expect(() => subject.setEndUser(''), returnsNormally);
+      expect(subject.endUserId, isNull);
+
+      expect(subject.riverpodObserver(), isNull);
+      expect(() => subject.talker.warning('still logging'), returnsNormally);
+    });
+
     test('safely() swallows what it runs', () {
       final OtelZone subject = zone()..bridge.ready = true;
       expect(

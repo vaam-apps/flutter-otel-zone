@@ -146,6 +146,10 @@ final class OtelZoneConfig {
   /// before Dart runs (in no-backup storage, deleted once acknowledged); the
   /// README's "What the platforms store before Dart runs" lists them.
   ///
+  /// It does not touch `enduser.id`, the one attribute [OtelZone.setEndUser]
+  /// stamps on purpose: a span's copy of it is exempt, and a log record's never
+  /// meets the redactor. Every other value is scrubbed exactly as before.
+  ///
   /// `null` means no scrubbing — the behaviour of every build that does not
   /// supply one. A [redact] that throws drops the record, or the span, rather
   /// than letting it through unredacted (fail closed).

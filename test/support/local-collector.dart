@@ -5,7 +5,10 @@ import 'dart:io';
 /// One request a [LocalCollector] received.
 final class CollectedRequest {
   /// Records a request.
-  const CollectedRequest(this.headers, this.body);
+  const CollectedRequest(this.headers, this.body, {this.path = ''});
+
+  /// The request path: `/v1/traces` for spans, `/v1/logs` for log records.
+  final String path;
 
   /// The request's headers, names lower-cased.
   final Map<String, String> headers;
@@ -73,7 +76,9 @@ final class LocalCollector {
     final List<int> body = <int>[
       for (final List<int> chunk in await request.toList()) ...chunk,
     ];
-    requests.add(CollectedRequest(headers, latin1.decode(body)));
+    requests.add(
+      CollectedRequest(headers, latin1.decode(body), path: request.uri.path),
+    );
     if (hang) return;
     request.response.statusCode = HttpStatus.ok;
     await request.response.close();
