@@ -40,6 +40,13 @@ env:
   # The example is built to export here, and the harness listens on it. The
   # emulator reaches the runner's loopback through `adb reverse`.
   OTEL_PORT: "4421"
+  # The Android emulator build the harness runs on: 37.1.11.0. It is the last
+  # build that passed. 37.2.12.0 (build 16428233, stable since 2026-10-01)
+  # stalls QEMU about twelve minutes into the API 34 run and takes adb with it,
+  # on every run that reached the repeat stage. Bump this only after the
+  # harness has passed repeatedly on the new build; the first script line below
+  # fails the step if the emulator that came up is not this one.
+  EMULATOR_BUILD: "15917651"
 
 jobs:
   android:
@@ -112,11 +119,35 @@ jobs:
         working-directory: example
         run: flutter build apk --release --dart-define=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:${{ env.OTEL_PORT }}
 
+      # The host's memory and disk every 15 seconds, for the emulator step
+      # below, whose failures have looked like a host problem (QEMU stalls, adb
+      # offline). It keeps running after this step and is stopped with the job.
+      - name: Sample the host
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/harness-logs"
+          (
+            set +e
+            while true; do
+              date -u +%FT%TZ
+              free -m
+              df -h "$HOME"
+              ps -eo pid,rss,etimes,args --sort=-rss | head -n 6 | cut -c1-160
+              echo
+              sleep 15
+            done
+          ) > "$GITHUB_WORKSPACE/harness-logs/host.txt" 2>&1 < /dev/null &
+
       # One emulator boot for everything: the host-driven crashes, the
       # release-build refusal, and last the in-app channel test — last because
       # `flutter test` rebuilds the debug APK without the endpoint define, and
       # the harness's `--no-build` runs must use the ones built above. Each line
       # runs as its own command, and the step fails on the first one that does.
+      #
+      # The emulator is pinned (`EMULATOR_BUILD`, above) because the action
+      # installs the latest stable one otherwise, and 37.2.12.0 hangs QEMU on
+      # API 34. The first line fails the step if the one running is another
+      # build, and the second logs the system image's revision, so a change in
+      # either is read from the log rather than guessed.
       #
       # No run is retried: a run that needs a retry is a defect (see #36, where
       # a retry hid a crash exported twice). Two lines exist to measure that
@@ -126,13 +157,18 @@ jobs:
       # the window they probe moves with the machine.
       - name: Crash, relaunch, drain
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        env:
+          API_LEVEL: ${{ matrix.api-level }}
         with:
           api-level: ${{ matrix.api-level }}
           target: google_apis
           arch: x86_64
           profile: pixel_6
           disable-animations: true
+          emulator-build: ${{ env.EMULATOR_BUILD }}
           script: |
+            "$ANDROID_HOME/emulator/emulator" -version | grep -F "build_id $EMULATOR_BUILD"
+            grep Pkg.Revision "$ANDROID_HOME/system-images/android-$API_LEVEL/google_apis/x86_64/source.properties"
             dart run tool/android-crash-harness.dart --no-build --kinds jvm,native,anr --log-dir ${{ github.workspace }}/harness-logs/kinds --port ${{ env.OTEL_PORT }}
             dart run tool/android-crash-harness.dart --no-build --kinds jvm,native --upgrade-apk ${{ runner.temp }}/app-1.0.1-2.apk --log-dir ${{ github.workspace }}/harness-logs/upgrade --port ${{ env.OTEL_PORT }}
             if [ "${{ matrix.api-level }}" = "34" ]; then dart run tool/android-crash-harness.dart --no-build --kinds native --repeat 20 --log-dir ${{ github.workspace }}/harness-logs/repeat --port ${{ env.OTEL_PORT }}; fi
@@ -140,9 +176,16 @@ jobs:
             dart run tool/android-crash-harness.dart --no-build --release-refusal --port ${{ env.OTEL_PORT }}
             cd example && flutter test integration_test -d emulator-5554
 
+      - name: Keep the host's kernel log
+        if: failure()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/harness-logs"
+          sudo dmesg -T 2>&1 | tee "$GITHUB_WORKSPACE/harness-logs/host-dmesg.txt" > /dev/null || true
+
       # What the runs saw, kept when one fails: each run's whole logcat and the
-      # OS's exit records. A failing run also prints the lines that decide it,
-      # but a flake is read here, after the fact, not re-run.
+      # OS's exit records, and the host's memory, disk and kernel log. A failing
+      # run also prints the lines that decide it, but a flake is read here,
+      # after the fact, not re-run.
       - name: Keep the harness logs
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
