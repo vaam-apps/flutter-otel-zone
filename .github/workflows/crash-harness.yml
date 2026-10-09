@@ -47,7 +47,7 @@ env:
   # the host" below is what lets 37.2.12.0 through. Bump this only after the
   # harness has passed repeatedly on the new build; the first script line of
   # the emulator step fails it if the emulator installed is not this one.
-  EMULATOR_BUILD: "16428233"
+  EMULATOR_BUILD: "15917651"
 
 jobs:
   android:
