@@ -40,13 +40,14 @@ env:
   # The example is built to export here, and the harness listens on it. The
   # emulator reaches the runner's loopback through `adb reverse`.
   OTEL_PORT: "4421"
-  # The Android emulator build the harness runs on: 37.1.11.0. It is the last
-  # build that passed. 37.2.12.0 (build 16428233, stable since 2026-10-01)
-  # stalls QEMU about twelve minutes into the API 34 run and takes adb with it,
-  # on every run that reached the repeat stage. Bump this only after the
-  # harness has passed repeatedly on the new build; the first script line below
-  # fails the step if the emulator installed is not this one.
-  EMULATOR_BUILD: "15917651"
+  # The Android emulator build the harness runs on: 37.2.12.0, stable since
+  # 2026-10-01. On its own it stalled QEMU about twelve minutes into the API 34
+  # run and took adb with it, on every run that reached the repeat stage; the
+  # last build that passed without help is 37.1.11.0 (15917651). The step "Free
+  # the host" below is what lets 37.2.12.0 through. Bump this only after the
+  # harness has passed repeatedly on the new build; the first script line of
+  # the emulator step fails it if the emulator installed is not this one.
+  EMULATOR_BUILD: "16428233"
 
 jobs:
   android:
@@ -137,6 +138,25 @@ jobs:
             done
           ) > "$GITHUB_WORKSPACE/harness-logs/host.txt" 2>&1 < /dev/null &
 
+      # The builds above leave their daemons running: a Gradle daemon (3.2 GB
+      # resident on the last run that was measured) and two Kotlin compile
+      # daemons (0.85 and 0.80 GB), about 4.9 GB that nothing uses again,
+      # beside an emulator that takes 2.5 GB on a 16 GB runner with 286 MB left
+      # free. The emulator build that stalls QEMU does so under that pressure,
+      # so the daemons are stopped before it starts. `free -m` before and after
+      # is in the log, and the sampler above keeps the rest in host.txt.
+      - name: Free the host
+        working-directory: example/android
+        run: |
+          free -m
+          ./gradlew --stop
+          # `pkill` exits 1 when nothing matched, which is a fine answer here:
+          # the Gradle stop may already have taken the Kotlin daemons with it.
+          pkill -f org.jetbrains.kotlin.daemon.KotlinCompileDaemon || true
+          sleep 5
+          free -m
+          ps -eo pid,rss,args --sort=-rss | head -n 6 | cut -c1-160
+
       # One emulator boot for everything: the host-driven crashes, the
       # release-build refusal, and last the in-app channel test — last because
       # `flutter test` rebuilds the debug APK without the endpoint define, and
@@ -144,14 +164,14 @@ jobs:
       # runs as its own command, and the step fails on the first one that does.
       #
       # The emulator is pinned (`EMULATOR_BUILD`, above) because the action
-      # installs the latest stable one otherwise, and 37.2.12.0 hangs QEMU on
-      # API 34. The first line fails the step if the installed emulator is
-      # another build, and the second logs the system image's revision, so a
-      # change in either is read from the log rather than guessed. The first
-      # reads the SDK's own record of the build instead of running `emulator
-      # -version`, which loads QEMU and fails on this runner for want of
-      # libpulse; the build that boots is the one the emulator's first log line
-      # names.
+      # installs the latest stable one otherwise, and a change of build moves
+      # what this step proves. The first line fails the step if the installed
+      # emulator is another build, and the second logs the system image's
+      # revision, so a change in either is read from the log rather than
+      # guessed. The first reads the SDK's own record of the build instead of
+      # running `emulator -version`, which loads QEMU and fails on this runner
+      # for want of libpulse; the build that boots is the one the emulator's
+      # first log line names.
       #
       # No run is retried: a run that needs a retry is a defect (see #36, where
       # a retry hid a crash exported twice). Two lines exist to measure that
@@ -180,18 +200,20 @@ jobs:
             dart run tool/android-crash-harness.dart --no-build --release-refusal --port ${{ env.OTEL_PORT }}
             cd example && flutter test integration_test -d emulator-5554
 
+      # The host's own record of the run, kept whether it passed or not: a
+      # green run's memory and kernel log are what a red one is read against.
       - name: Keep the host's kernel log
-        if: failure()
+        if: always()
         run: |
           mkdir -p "$GITHUB_WORKSPACE/harness-logs"
           sudo dmesg -T 2>&1 | tee "$GITHUB_WORKSPACE/harness-logs/host-dmesg.txt" > /dev/null || true
 
-      # What the runs saw, kept when one fails: each run's whole logcat and the
-      # OS's exit records, and the host's memory, disk and kernel log. A failing
-      # run also prints the lines that decide it, but a flake is read here,
-      # after the fact, not re-run.
+      # What the runs saw: each run's whole logcat and the OS's exit records,
+      # and the host's memory, disk and kernel log. A failing run also prints
+      # the lines that decide it, but a flake is read here, after the fact, not
+      # re-run. Kept on every run, for the reason above.
       - name: Keep the harness logs
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: harness-logs-api-${{ matrix.api-level }}
