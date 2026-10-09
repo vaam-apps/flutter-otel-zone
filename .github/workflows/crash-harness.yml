@@ -204,6 +204,7 @@ jobs:
           profile: pixel_6
           disable-animations: true
           emulator-build: ${{ env.EMULATOR_BUILD }}
+          emulator-options: -no-window -gpu guest -no-snapshot -noaudio -no-boot-anim
           script: |
             grep -Fx "Pkg.BuildId=$EMULATOR_BUILD" "$ANDROID_HOME/emulator/source.properties"
             grep Pkg.Revision "$ANDROID_HOME/system-images/android-$API_LEVEL/google_apis/x86_64/source.properties"
