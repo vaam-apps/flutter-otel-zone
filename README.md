@@ -616,6 +616,24 @@ and the second engine runs `start()` again. So the assertion is on everything
 that reached the receiver over the launch, and the start-up line's "recovered
 N" is required to say exactly one only when the activity was not relaunched.
 
+A fresh install includes the OS having forgotten the last one. `adb uninstall`
+returns when the package manager is done, not the activity manager: that drops
+the uninstalled package's exit records when the removal broadcast reaches it,
+and it drops them by package *name*, so the next install's record goes too if
+that install has already crashed. The broadcast usually lands within two
+seconds; on a loaded emulator it has taken about 16 and 17 seconds, after the
+new install had crashed and the OS had filed it, and the launch that followed
+read nothing (`received []`). So the harness dumps the exit history before it
+uninstalls, and after the uninstall waits, every half second for at most two
+minutes, until the dump lists no record and the OS has written its history
+since. It prints `previous install left the exit history after <ms> ms`, and a
+run that shows ten seconds or more there is one the harness used to be exposed
+to. That wait is on the OS's own state, not a retry, and no assertion is relaxed
+by it; `--upgrade-apk` needs none, because an update is a replacing install and
+the same receiver ignores it. When a run still comes back without its record,
+its failure says whether the OS still holds it (the app lost it) or no longer
+does.
+
 ```bash
 cd example && flutter pub get && flutter create --platforms=android . && cd ..
 dart run tool/android-crash-harness.dart --device emulator-5554
@@ -657,7 +675,9 @@ crash arrive twice) and how it stays fixed; the window is tens of milliseconds
 wide and moves with the machine, so sweep it rather than trust one value.
 
 The receiver (`tool/otlp-log-sink.dart`) decodes OTLP by hand and is
-unit-tested against the SDK's own encoder.
+unit-tested against the SDK's own encoder, and what the harness reads out of
+the OS's exit history (`tool/exit-info.dart`) is unit-tested against dumps
+captured from the CI emulators.
 
 **The ANR needs two things a bare block does not give.** An ANR is declared
 only when something is *waiting* on the blocked main thread, so the script sends

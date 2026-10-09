@@ -20,6 +20,11 @@
 //      receiver;
 //   5. relaunch once more: nothing may have been recovered.
 //
+// "Freshly installed" includes the OS having forgotten the previous install:
+// uninstalling returns before the activity manager has dropped that install's
+// exit records, and dropping them later would take the new install's with them.
+// `_Device.reinstall` waits for it, on the OS's own state, before it installs.
+//
 // A launch is judged once it has been quiet for `--settle` seconds, not when
 // the first start-up line appears. Android relaunches an activity in the same
 // process, by itself, whenever an asset path or the package's application info
@@ -60,6 +65,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'exit-info.dart';
 import 'log-window.dart';
 import 'otlp-log-sink.dart';
 
@@ -369,11 +375,52 @@ class _Device {
   }
 
   /// A fresh install, so no earlier run's exit records or watermark survive.
+  ///
+  /// `adb uninstall` returns when the package manager is done, not the
+  /// activity manager. The package manager then broadcasts the removal, and
+  /// when the activity manager's receiver gets it, which on a loaded emulator
+  /// can be seconds later, it destroys every exit record filed under the
+  /// package *name*: the new install's too, if it has already crashed. Installed
+  /// straight away, the next install can crash and have its record filed
+  /// before that happens, and the harness then reads nothing for a crash that
+  /// did happen (`received []`). So this dumps the exit history first, and
+  /// after the uninstall waits until the OS says it has dropped it
+  /// ([removalSettled]) before it installs, polling every half a second and
+  /// throwing a [StateError] after two minutes, as it does when `adb` fails.
+  /// The wait is on the OS's own state and is not a retry: the run itself is
+  /// untouched and nothing it asserts is relaxed.
+  ///
+  /// [upgrade] needs none of this. Replacing an install broadcasts a removal
+  /// marked as a replacement, which the activity manager ignores, so the
+  /// history is kept: that is the point of an update.
   Future<void> reinstall(String apk) async {
+    const Duration pause = Duration(milliseconds: 500);
+    const Duration timeout = Duration(seconds: 120);
+    final String before = await exitInfo();
+    var uninstalled = false;
     try {
       await adbCommand(<String>['uninstall', _package]);
+      uninstalled = true;
     } on Object {
-      // Not installed yet.
+      // Not installed yet: no removal is coming, so nothing to wait for.
+    }
+    if (uninstalled) {
+      final Stopwatch clock = Stopwatch()..start();
+      String after = await exitInfo();
+      while (!removalSettled(before: before, after: after)) {
+        if (clock.elapsed >= timeout) {
+          throw StateError(
+            'the OS still held the previous install\'s exit history '
+            '${timeout.inSeconds}s after it was uninstalled\n$after',
+          );
+        }
+        await Future<void>.delayed(pause);
+        after = await exitInfo();
+      }
+      stdout.writeln(
+        '  previous install left the exit history after '
+        '${clock.elapsedMilliseconds} ms',
+      );
     }
     await adbCommand(<String>['install', '-r', '-t', apk]);
   }
@@ -517,12 +564,9 @@ class _Device {
     int reason, {
     Duration timeout = const Duration(seconds: 60),
   }) async {
-    final RegExp record = RegExp(
-      'pid=$pid\\b(?:(?!ApplicationExitInfo)[\\s\\S])*?reason=$reason \\(',
-    );
     final Stopwatch clock = Stopwatch()..start();
     while (clock.elapsed < timeout) {
-      if (record.hasMatch(await exitInfo())) return true;
+      if (holdsExitRecord(await exitInfo(), pid, reason)) return true;
       await Future<void>.delayed(const Duration(milliseconds: 500));
     }
     return false;
@@ -733,6 +777,11 @@ class _KindRun {
         'launch 2: expected exactly one "$kind" record, '
         'received ${second.kinds}',
       );
+      if (crashing != null && !second.kinds.contains(kind)) {
+        // Not an assertion of its own: the one above has already failed. It
+        // says which of the two ways a record goes missing this was.
+        _problems.add(await _whereTheRecordWent(crashing));
+      }
       final Iterable<SinkRecord> crashes = second.records.where(
         (SinkRecord r) => r.crashKind != null,
       );
@@ -812,6 +861,21 @@ class _KindRun {
     stdout.writeln('');
     await _keepEvidence(logDir, capture, print: true);
     return false;
+  }
+
+  /// Where the OS's record of [pid]'s death is now that launch 2 reported none:
+  /// still in its history, so the app lost it, or gone from it, so the OS did.
+  Future<String> _whereTheRecordWent(int pid) async {
+    try {
+      final String dump = await device.exitInfo();
+      return holdsExitRecord(dump, pid, _exitReason)
+          ? "launch 2: the OS still holds pid $pid's record (the app lost it)"
+          : "launch 2: the OS removed pid $pid's record "
+                '(last persisted ${exitInfoPersistedAt(dump)})';
+    } on Object catch (error) {
+      return "launch 2: could not read the OS's exit history to say where "
+          "pid $pid's record went: $error";
+    }
   }
 
   /// The start-up lines of [launch], with the process each came from.
