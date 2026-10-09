@@ -123,16 +123,30 @@ jobs:
       # The host's memory and disk every 15 seconds, for the emulator step
       # below, whose failures have looked like a host problem (QEMU stalls, adb
       # offline). It keeps running after this step and is stopped with the job.
+      # Once the emulator is up it also records the emulator's own memory: the
+      # rollup every time, and its five largest mappings once a minute, because
+      # the emulator's resident size is what the host's memory is spent on.
       - name: Sample the host
         run: |
           mkdir -p "$GITHUB_WORKSPACE/harness-logs"
           (
             set +e
+            n=0
             while true; do
               date -u +%FT%TZ
               free -m
               df -h "$HOME"
               ps -eo pid,rss,etimes,args --sort=-rss | head -n 6 | cut -c1-160
+              pid=$(pgrep -f /qemu-system-x86_64 | head -n 1)
+              if [ -n "$pid" ]; then
+                echo "emulator $pid"
+                grep -E '^(Rss|Pss_Anon|Pss_File|Pss_Shmem|Swap):' "/proc/$pid/smaps_rollup"
+                if [ $((n % 4)) -eq 0 ]; then
+                  echo "largest mappings (kB, range, name)"
+                  awk '/^[0-9a-f]+-[0-9a-f]+ /{m=$1" "$6} /^Rss:/{print $2, m}' "/proc/$pid/smaps" | sort -rn | head -n 5
+                fi
+              fi
+              n=$((n + 1))
               echo
               sleep 15
             done
