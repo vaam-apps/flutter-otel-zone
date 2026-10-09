@@ -43,9 +43,15 @@ env:
   # The Android emulator build the harness runs on: 37.1.11.0. It is the last
   # build that passed. 37.2.12.0 (build 16428233, stable since 2026-10-01)
   # stalls QEMU about twelve minutes into the API 34 run and takes adb with it,
-  # on every run that reached the repeat stage. Bump this only after the
-  # harness has passed repeatedly on the new build; the first script line below
-  # fails the step if the emulator installed is not this one.
+  # on every run that reached the repeat stage. The cause is memory: its
+  # process grows by 50 to 300 MB for every app launch, crashed or not, until
+  # the 16 GB runner and its 3 GB of swap are spent, where 37.1.11.0 stops
+  # growing at about 4 GB after the first few launches. Stopping the build
+  # daemons first (below) is not enough, and neither is rendering without
+  # Vulkan or in the guest. Bump this only after the harness has passed
+  # repeatedly on the new build and its host.txt shows the emulator's size
+  # level; the first script line below fails the step if the emulator
+  # installed is not this one.
   EMULATOR_BUILD: "15917651"
 
 jobs:
@@ -137,6 +143,23 @@ jobs:
             done
           ) > "$GITHUB_WORKSPACE/harness-logs/host.txt" 2>&1 < /dev/null &
 
+      # The builds above leave their daemons running: a Gradle daemon (3.2 GB
+      # resident on the last run that was measured) and two Kotlin compile
+      # daemons (0.85 and 0.75 GB), about 4.8 GB that nothing uses again until
+      # the last command of the emulator step starts its own. Stopping them
+      # hands the emulator that memory instead of leaving it to the swap, and
+      # `free -m` before and after is in the log.
+      - name: Free the host
+        working-directory: example/android
+        run: |
+          free -m
+          ./gradlew --stop
+          # `pkill` exits 1 when nothing matched, which is a fine answer here:
+          # the Gradle stop may already have taken the Kotlin daemons with it.
+          pkill -f org.jetbrains.kotlin.daemon.KotlinCompileDaemon || true
+          sleep 5
+          free -m
+
       # One emulator boot for everything: the host-driven crashes, the
       # release-build refusal, and last the in-app channel test — last because
       # `flutter test` rebuilds the debug APK without the endpoint define, and
@@ -180,18 +203,20 @@ jobs:
             dart run tool/android-crash-harness.dart --no-build --release-refusal --port ${{ env.OTEL_PORT }}
             cd example && flutter test integration_test -d emulator-5554
 
+      # The host's own record of the run, kept whether it passed or not: a
+      # green run's memory and kernel log are what a red one is read against.
       - name: Keep the host's kernel log
-        if: failure()
+        if: always()
         run: |
           mkdir -p "$GITHUB_WORKSPACE/harness-logs"
           sudo dmesg -T 2>&1 | tee "$GITHUB_WORKSPACE/harness-logs/host-dmesg.txt" > /dev/null || true
 
-      # What the runs saw, kept when one fails: each run's whole logcat and the
-      # OS's exit records, and the host's memory, disk and kernel log. A failing
-      # run also prints the lines that decide it, but a flake is read here,
-      # after the fact, not re-run.
+      # What the runs saw: each run's whole logcat and the OS's exit records,
+      # and the host's memory, disk and kernel log. A failing run also prints
+      # the lines that decide it, but a flake is read here, after the fact, not
+      # re-run. Kept on every run, for the reason above.
       - name: Keep the harness logs
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: harness-logs-api-${{ matrix.api-level }}
