@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.6.0...v0.7.0) (2026-10-15)
+
+
+### Features
+
+* setCrashScreen names the screen a native crash or ANR happened on ([#57](https://github.com/vaam-apps/flutter-otel-zone/issues/57)) ([91cf632](https://github.com/vaam-apps/flutter-otel-zone/commit/91cf632b6e4241c918012c1d1881fe617b9d453c))
+
+
+### Continuous Integration
+
+* keep the crash harness's host records on every run and free its memory first ([#55](https://github.com/vaam-apps/flutter-otel-zone/issues/55)) ([20b8ac6](https://github.com/vaam-apps/flutter-otel-zone/commit/20b8ac69cc8a8c1122fdf3a1c737cad19c28024e))
+* pin the Android emulator to 37.1.11 for the crash harness ([#52](https://github.com/vaam-apps/flutter-otel-zone/issues/52)) ([39e6ef6](https://github.com/vaam-apps/flutter-otel-zone/commit/39e6ef60b89288f29fc04023569f63cf2e228df5))
+* wait out the uninstall before the crash harness reinstalls ([#54](https://github.com/vaam-apps/flutter-otel-zone/issues/54)) ([c1ec6c6](https://github.com/vaam-apps/flutter-otel-zone/commit/c1ec6c692904572f9f09cd1d666be102cc3db3af))
+
 ## [0.6.0](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.5.0...v0.6.0) (2026-10-08)
 
 
