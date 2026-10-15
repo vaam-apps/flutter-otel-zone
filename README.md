@@ -587,9 +587,11 @@ observability.setCrashScreen(null);
 ```
 
 Pass the route **pattern**, the way the router names the page. Never a location
-with an id, a query or any user text in it. With fespalier 0.18.0 or later,
+with an id, a query or any user text in it. With fespalier 0.19.0 or later,
 `FespalierOtel(onScreen: observability.setCrashScreen)` makes that call for
-every navigation, so the app does not write it by hand.
+every navigation, so the app does not write it by hand. fespalier makes it once
+the new page's first frame is built, so a crash during that frame names the page
+the user came from.
 
 The call needs no SDK, so it is safe before `start()`. It does need the Flutter
 binding: make it after `WidgetsFlutterBinding.ensureInitialized()`. Before that
