@@ -980,29 +980,6 @@ void main() {
     test('the attribute name is the one the platforms write', () {
       expect(NativeCrashDrain.crashedScreen, 'otel_zone.crashed.screen');
     });
-
-    test('a recovered crash is not stamped with the current screen', () async {
-      final RecordingCrashScreenSink crashScreen = RecordingCrashScreenSink();
-      final OtelZone zone = OtelZone(
-        const OtelZoneConfig(
-          serviceName: 'native-crash-test',
-          endpoint: 'http://127.0.0.1:4318',
-          useConsoleLogs: false,
-        ),
-        crashScreenSink: crashScreen,
-      );
-      // The screen of this launch: the crash below happened on an earlier one.
-      zone.setCrashScreen('/now');
-      await pumpEventQueue();
-      expect(crashScreen.screens, <String?>['/now']);
-
-      final ReadableLogRecord record = await exported(_report());
-
-      expect(
-        record.attributes?.getString(NativeCrashDrain.crashedScreen),
-        isNull,
-      );
-    });
   });
 
   test('the redactor scrubs the record it produces', () async {

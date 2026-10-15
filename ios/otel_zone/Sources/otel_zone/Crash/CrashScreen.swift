@@ -6,7 +6,14 @@ import Foundation
 /// [set] runs on the Pigeon background queue. The `NSException` handler reads
 /// [current] on the throwing thread, in a process that is about to abort, so
 /// the read is one lock and one copy of a string, never I/O. The run log is
-/// written after the lock is released, so no lock is held across a file write.
+/// written after the value lock is released, so the handler never waits for a
+/// file write.
+///
+/// Two engines have two Pigeon queues, so two [set]s can overlap. A second lock,
+/// `writeLock`, is held across a whole [set], the comparison, the new value and
+/// the file write, so the file always ends on the value [current] ends on. The
+/// order is always `writeLock` then `lock`, and nothing takes `writeLock` while
+/// holding `lock`; [current] takes `lock` alone.
 final class CrashScreen {
   /// The attribute a crash record carries the screen in.
   static let attribute = "otel_zone.crashed.screen"
@@ -16,6 +23,7 @@ final class CrashScreen {
   static let shared = CrashScreen()
 
   private let lock = NSLock()
+  private let writeLock = NSLock()
   private var value: String?
   private var log: RunScreenLog?
 
@@ -40,6 +48,8 @@ final class CrashScreen {
   /// An unchanged screen is not written again.
   func set(_ screen: String?) {
     let cleaned = Self.clean(screen)
+    writeLock.lock()
+    defer { writeLock.unlock() }
     lock.lock()
     let changed = cleaned != value
     value = cleaned

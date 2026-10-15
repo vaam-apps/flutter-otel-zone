@@ -132,7 +132,7 @@ struct NSExceptionReport: Equatable {
   /// a report written before it was recorded, which must stay unknown.
   var appBuild = AppBuild.unknown
   /// The screen the app was showing when it threw, or `nil` when it named none.
-  var screen: String? = nil
+  var screen: String?
 
   /// The report in [data], or `nil` when this build cannot read it.
   static func decode(id: String, data: Data) -> NSExceptionReport? {

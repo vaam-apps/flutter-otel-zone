@@ -55,8 +55,12 @@ public class OtelZonePlugin: NSObject, FlutterPlugin {
     // The screen each run showed, so a MetricKit crash can be given the screen
     // of the run it came from. Swept once here, and attached to CrashScreen
     // before the exception handler is installed, so both read the same screen.
+    // This run's file is written now, with no screen, so that a run that dies
+    // before Dart names one still leaves a file: a reused pid then matches two
+    // runs and names none, instead of matching an older run's screen.
     let screens = RunScreenLog(directory: directories.screens)
     screens.sweep()
+    screens.record(nil)
     CrashScreen.shared.attach(screens)
     let repository = NativeCrashRepository(
       metricKit: metricKitStore, exceptions: exceptionStore,

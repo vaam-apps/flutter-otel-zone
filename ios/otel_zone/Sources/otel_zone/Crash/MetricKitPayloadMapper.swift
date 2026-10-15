@@ -21,7 +21,7 @@ struct MappedDiagnostic {
   /// The crashed process's pid, from the payload's metadata. It is what matches
   /// the crash to the run that had it, and it is still exported as
   /// `metrickit.meta.pid`. `nil` for a hang and for a payload without one.
-  var pid: Int? = nil
+  var pid: Int?
 }
 
 /// Maps the JSON of an `MXDiagnosticPayload` (`jsonRepresentation()`) to

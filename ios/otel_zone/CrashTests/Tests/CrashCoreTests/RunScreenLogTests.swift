@@ -86,6 +86,16 @@ final class RunScreenLogTests: XCTestCase {
     XCTAssertNil(match(reader()))
   }
 
+  func testARunThatNamedNoScreenStillCountsWhenItsPidWasReused() {
+    // The older run showed /old. The newer one, the crashed run, wrote its file
+    // at launch (record(nil)) and died before it named a screen. Both are
+    // candidates, so the old run's screen is not given to the crash.
+    run(pid: 811, launched: windowStart.addingTimeInterval(600), screen: "/old")
+    run(pid: 811, launched: windowStart.addingTimeInterval(1200), screen: nil)
+
+    XCTAssertNil(match(reader()))
+  }
+
   func testSweepKeepsTheNewest64AndDropsRunsOlderThanAWeek() throws {
     let now = Date(timeIntervalSince1970: 1_790_700_000)
     let old = now.addingTimeInterval(-8 * 24 * 60 * 60)
@@ -101,6 +111,27 @@ final class RunScreenLogTests: XCTestCase {
     XCTAssertFalse(names.contains(runName(old, pid: 1)), "older than a week")
     XCTAssertFalse(names.contains(runName(now, pid: 2)), "the oldest of the 70 is dropped")
     XCTAssertTrue(names.contains(runName(now.addingTimeInterval(69), pid: 2)))
+  }
+
+  func testSweepRemovesTheTempFilesAnInterruptedWriteLeftAtAnyAge() throws {
+    let now = Date(timeIntervalSince1970: 1_790_700_000)
+    run(pid: 2, launched: now, screen: "/kept")
+    let fresh = runName(now, pid: 3) + ".tmp"
+    let old = runName(now.addingTimeInterval(-30 * 24 * 60 * 60), pid: 4) + ".tmp"
+    let unrelated = ["notes.tmp", "run-1.json.tmp", "run-x-y.json.tmp"]
+    for name in [fresh, old] + unrelated {
+      try Data("{".utf8).write(to: directory.appendingPathComponent(name))
+    }
+
+    RunScreenLog(directory: directory, pid: 9, launchedAt: now, now: { now }).sweep()
+
+    let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+    XCTAssertFalse(names.contains(fresh), "a half-written run file of any age")
+    XCTAssertFalse(names.contains(old), "a half-written run file of any age")
+    XCTAssertTrue(names.contains(runName(now, pid: 2)), "a finished run file stays")
+    for name in unrelated {
+      XCTAssertTrue(names.contains(name), "\(name) is not a run file's temp")
+    }
   }
 
   func testAnUnreadableRunFileYieldsNil() throws {

@@ -336,6 +336,19 @@ final class NativeCrashRepositoryTests: XCTestCase {
     XCTAssertEqual(report.attributes?[CrashScreen.attribute], "/orders/:id")
   }
 
+  func testAMetricKitCrashWhoseRunNamedNoScreenDoesNotTakeAnOlderRunsWithTheSamePid() throws {
+    persist("crash-sigsegv")
+    let windowStart = Date(timeIntervalSince1970: 1_790_582_400)
+    // The pid was reused: the older run showed /old, and the crashed run wrote
+    // its file at launch and died before it named a screen.
+    harness.writeRun(pid: 811, launchedAt: windowStart.addingTimeInterval(600), screen: "/old")
+    harness.writeRun(pid: 811, launchedAt: windowStart.addingTimeInterval(1200), screen: nil)
+
+    let report = try XCTUnwrap(harness.repository.pending().first)
+
+    XCTAssertNil(report.attributes?[CrashScreen.attribute])
+  }
+
   func testAMetricKitCrashWithNoMatchingRunHasNoScreen() throws {
     persist("crash-sigsegv")
 

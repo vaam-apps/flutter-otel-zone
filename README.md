@@ -515,8 +515,9 @@ the app keeps on the phone.
   exception's reason is free text and often carries app data.
 - **iOS, the screen each run showed.** One small JSON file per run in
   `Application Support/otel_zone/screens/`, holding the run's pid, its launch
-  time and its last screen. At most 64 are kept, and a run older than seven days
-  is removed.
+  time and its last screen, written at launch and replaced on each change. At
+  most 64 are kept, a run older than seven days is removed, and so is a
+  half-written file that a run killed mid-write left behind.
 
 All of it is app-private and in no-backup storage: `noBackupFilesDir` on
 Android, and on iOS a directory marked `isExcludedFromBackup` (best effort: if
@@ -586,9 +587,13 @@ observability.setCrashScreen(null);
 ```
 
 Pass the route **pattern**, the way the router names the page. Never a location
-with an id, a query or any user text in it. With fespalier,
+with an id, a query or any user text in it. With fespalier 0.18.0 or later,
 `FespalierOtel(onScreen: observability.setCrashScreen)` makes that call for
 every navigation, so the app does not write it by hand.
+
+The call needs no SDK, so it is safe before `start()`. It does need the Flutter
+binding: make it after `WidgetsFlutterBinding.ensureInitialized()`. Before that
+the channel throws, the first screen is lost, and one warning is logged.
 
 The attribute is present only when the platform knows the screen. It is never
 guessed: a crash that names no screen is "unknown", not the screen of this
@@ -643,18 +648,20 @@ that a redactor rewrites reaches the collector rewritten.
 **ANR, hang and background.** An Android ANR carries the last screen the
 platform received. The frozen main thread cannot navigate, so that is the screen
 the app was on when it froze. An iOS hang never carries a screen: the process
-lived on, and the run's last screen is not the screen during the hang. A kill in
-the background, by a signal or by the low-memory killer, carries the screen the
-app was left on.
+lived on, and the run's last screen is not the screen during the hang. On
+Android, a kill in the background, by a signal or by the low-memory killer,
+carries the screen the app was left on.
 
 **iOS and MetricKit.** A MetricKit crash names only a pid and a time window. Each
 run keeps one small file of its pid, launch time and last screen (see "What the
-platforms store before Dart runs"). A crash takes the screen of the one run with
-its pid whose launch falls in the payload's window, from a day before it. Two
-runs with one pid, or none, mean no screen. This needs iOS 17 or later, where the
-payload carries the pid. An `NSException` report carries its own screen, which
-wins when the two are merged. At most 64 run files are kept, and a run older
-than seven days is removed.
+platforms store before Dart runs"). The file is written at launch, before Dart
+has named any screen, so a run that died before it did still leaves one, and an
+older run that had the same pid cannot be taken for it. A crash takes the screen
+of the one run with its pid whose launch falls in the payload's window, from a
+day before it. Two runs with one pid, or none, mean no screen. This needs iOS 17
+or later, where the payload carries the pid. An `NSException` report carries its
+own screen, which wins when the two are merged. At most 64 run files are kept,
+and a run older than seven days is removed.
 
 iOS 27's own MetricKit state reporting (`StateReportingDomain`) is the long-term
 replacement for those files. It needs the Xcode 27 SDK, so it is not built here,

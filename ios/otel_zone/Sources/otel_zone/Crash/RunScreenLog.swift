@@ -6,9 +6,11 @@ import Foundation
 /// A MetricKit diagnostic names the crashed process's pid and a reporting
 /// window, not a run. So each run keeps one small JSON file,
 /// `run-<launch millis>-<pid>.json`, holding its pid, its launch time and its
-/// last screen, atomically replaced on each change. A diagnostic takes a screen
-/// only when exactly one other run matches its pid and window, because a pid is
-/// reused and a guess is worse than none.
+/// last screen, atomically replaced on each change. The plugin writes it at
+/// launch, with no screen, so every run has a file even if it dies before it
+/// names one. A diagnostic takes a screen only when exactly one other run
+/// matches its pid and window, because a pid is reused and a guess is worse
+/// than none.
 final class RunScreenLog {
   /// The newest this many run files are kept.
   static let maxFiles = 64
@@ -67,9 +69,16 @@ final class RunScreenLog {
   /// Removes runs launched more than [maxAge] ago, then all but the newest
   /// [maxFiles]. Called once, at install. Ages come from the launch time in each
   /// file's name, never from its attributes.
+  ///
+  /// Also removes, whatever their age, the `run-*.json.tmp` files that a run
+  /// killed in the middle of a write left behind. No write is under way here:
+  /// [record] holds the lock for the whole of one.
   func sweep() {
     lock.lock()
     defer { lock.unlock() }
+    for name in tempNames() {
+      remove(name)
+    }
     let cutoff = now().addingTimeInterval(-Self.maxAge)
     var kept: [String] = []
     for name in runNames() {
@@ -113,9 +122,20 @@ final class RunScreenLog {
   /// The run file names in this directory that this log could have written,
   /// oldest first.
   private func runNames() -> [String] {
-    let names =
-      (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-    return names.filter { Self.launch(ofName: $0) != nil }.sorted()
+    entries().filter { Self.launch(ofName: $0) != nil }.sorted()
+  }
+
+  /// The temp files of an interrupted [record]: a run file's name and the temp
+  /// suffix [CrashFileStore.atomicWrite] adds.
+  private func tempNames() -> [String] {
+    entries().filter { name in
+      name.hasSuffix(CrashFileStore.tempSuffix)
+        && Self.launch(ofName: String(name.dropLast(CrashFileStore.tempSuffix.count))) != nil
+    }
+  }
+
+  private func entries() -> [String] {
+    (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
   }
 
   private func remove(_ name: String) {

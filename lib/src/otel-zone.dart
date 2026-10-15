@@ -213,7 +213,10 @@ class OtelZone {
   /// [CrashScreenSink].
   ///
   /// Safe before [start], and it needs no SDK: the platform is told at once.
-  /// The value is process-wide, and the last call wins.
+  /// It does need the Flutter binding, so call it after
+  /// `WidgetsFlutterBinding.ensureInitialized()`: before that the channel
+  /// throws, the first screen is lost, and one warning is logged. The value is
+  /// process-wide, and the last call wins.
   void setCrashScreen(String? screen) {
     final String? value = normalizeCrashScreen(screen);
     if (value == _crashScreenValue) return;

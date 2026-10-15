@@ -25,8 +25,8 @@ const String _channel =
     'dev.flutter.pigeon.otel_zone.CrashContextApi.setCrashScreen';
 
 /// A platform whose answers the test gives: each call's future completes
-/// when the test completes it, and nothing is sent past the first one while
-/// [holding] is set.
+/// when the test completes its entry in [pending], so a message stays in
+/// flight until then.
 class _HeldSink implements CrashScreenSink {
   final List<String?> screens = <String?>[];
   final List<Completer<void>> pending = <Completer<void>>[];

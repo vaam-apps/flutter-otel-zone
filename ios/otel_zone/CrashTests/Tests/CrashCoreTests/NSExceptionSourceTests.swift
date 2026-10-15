@@ -202,7 +202,6 @@ final class NSExceptionSourceTests: XCTestCase {
     XCTAssertEqual(AppBuild.read(from: try XCTUnwrap(Bundle(url: bundleDirectory))), .unknown)
   }
 
-
   // MARK: - The screen
 
   func testTheHandlerWritesTheScreenCurrentWhenTheExceptionFires() throws {
