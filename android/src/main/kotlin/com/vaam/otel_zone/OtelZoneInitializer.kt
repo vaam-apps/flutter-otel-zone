@@ -2,6 +2,7 @@ package com.vaam.otel_zone
 
 import android.app.ActivityManager
 import android.content.Context
+import android.os.Build
 import androidx.startup.Initializer
 
 /**
@@ -20,15 +21,28 @@ class OtelZoneInitializer : Initializer<Unit> {
         // calling the package manager, and this is the build that is running.
         val build = AppBuild.read(context)
         installJvmCrashHandler(
-            CrashStore(crashDirectory(context), sessionId = RunSession.id, build = build),
+            CrashStore(
+                crashDirectory(context),
+                sessionId = RunSession.id,
+                build = build,
+                screen = { CrashScreen.process.current },
+            ),
         )
 
         // Tags this process so that its ApplicationExitInfo, read on a later
-        // launch, says which session and which build it ended. Below API 30
-        // this is a no-op and the JVM reports carry both themselves.
+        // launch, says which session, which build and which screen it ended.
+        // Below API 30 this is a no-op and the JVM reports carry them
+        // themselves. The tagger is kept: a change of screen rewrites the same
+        // summary, through the same call.
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
         if (activityManager != null) {
-            RunSession.tag(build = build) { summary -> activityManager.setProcessStateSummary(summary) }
+            val tagRun: (String?) -> Boolean = { s ->
+                RunSession.tag(build = build, screen = s) { summary ->
+                    activityManager.setProcessStateSummary(summary)
+                }
+            }
+            tagRun(null)
+            CrashScreen.process = CrashScreen(Build.VERSION.SDK_INT, tagRun)
         }
     }
 

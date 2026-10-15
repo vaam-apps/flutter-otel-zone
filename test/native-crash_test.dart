@@ -910,6 +910,78 @@ void main() {
     });
   });
 
+  group('the crashed screen', () {
+    Future<ReadableLogRecord> exported(
+      NativeCrashReport report, {
+      Redactor? redact,
+    }) async {
+      final _RecordingExporter exporter = _RecordingExporter();
+      final NativeCrashDrain subject = drain(
+        _FakeSource(<NativeCrashReport>[report]),
+        exporter,
+        redact: redact,
+      );
+      await subject.drain();
+      await subject.settled();
+      return exporter.batches.single.single;
+    }
+
+    test(
+      'a report\'s screen is exported as otel_zone.crashed.screen',
+      () async {
+        final ReadableLogRecord record = await exported(
+          _report(
+            attributes: <String, String>{
+              'otel_zone.crashed.screen': '/orders/:id',
+            },
+          ),
+        );
+
+        expect(
+          record.attributes?.getString('otel_zone.crashed.screen'),
+          '/orders/:id',
+        );
+      },
+    );
+
+    test('the screen goes through redact', () async {
+      final ReadableLogRecord record = await exported(
+        _report(
+          attributes: <String, String>{'otel_zone.crashed.screen': '/a/1'},
+        ),
+        redact: (String input) => input.replaceAll(RegExp(r'\d'), '#'),
+      );
+
+      expect(
+        record.attributes?.getString(NativeCrashDrain.crashedScreen),
+        '/a/#',
+      );
+    });
+
+    test(
+      'a screen the redactor empties is left out, not exported empty',
+      () async {
+        final ReadableLogRecord record = await exported(
+          _report(
+            attributes: <String, String>{
+              'otel_zone.crashed.screen': '/secret/1',
+            },
+          ),
+          redact: (String input) => input.startsWith('/secret') ? '' : input,
+        );
+
+        expect(
+          record.attributes?.getString(NativeCrashDrain.crashedScreen),
+          isNull,
+        );
+      },
+    );
+
+    test('the attribute name is the one the platforms write', () {
+      expect(NativeCrashDrain.crashedScreen, 'otel_zone.crashed.screen');
+    });
+  });
+
   test('the redactor scrubs the record it produces', () async {
     final _FakeSource source = _FakeSource(<NativeCrashReport>[
       _report(

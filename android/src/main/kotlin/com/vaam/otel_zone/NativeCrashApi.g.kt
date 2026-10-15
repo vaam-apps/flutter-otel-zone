@@ -386,3 +386,47 @@ interface NativeCrashApi {
     }
   }
 }
+/**
+ * Tells the platform which screen the app shows, so that the record of a native death,
+ * read on the next launch, can name it.
+ *
+ * Generated interface from Pigeon that represents a handler of messages from Flutter.
+ */
+interface CrashContextApi {
+  /**
+   * Records [screen] (a route pattern, at most 64 UTF-8 bytes; null clears it) as the screen
+   * this process shows. Runs on a serial background queue: the platform thread only dispatches.
+   */
+  fun setCrashScreen(screen: String?)
+
+  companion object {
+    /** The codec used by CrashContextApi. */
+    val codec: MessageCodec<Any?> by lazy {
+      NativeCrashApiPigeonCodec()
+    }
+    /** Sets up an instance of `CrashContextApi` to handle messages through the `binaryMessenger`. */
+    @JvmOverloads
+    fun setUp(binaryMessenger: BinaryMessenger, api: CrashContextApi?, messageChannelSuffix: String = "") {
+      val separatedMessageChannelSuffix = if (messageChannelSuffix.isNotEmpty()) ".$messageChannelSuffix" else ""
+      val taskQueue = binaryMessenger.makeBackgroundTaskQueue()
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.otel_zone.CrashContextApi.setCrashScreen$separatedMessageChannelSuffix", codec, taskQueue)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val screenArg = args[0] as String?
+            val wrapped: List<Any?> = try {
+              api.setCrashScreen(screenArg)
+              listOf(null)
+            } catch (exception: Throwable) {
+              NativeCrashApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+    }
+  }
+}

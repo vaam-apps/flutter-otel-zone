@@ -41,7 +41,9 @@
 //
 // Each recovered record must also say which build died: the attributes
 // `otel_zone.crashed.service.version` and `otel_zone.crashed.app.build_id`,
-// which the app reads back from the process that crashed.
+// which the app reads back from the process that crashed, and the screen it
+// died on, `otel_zone.crashed.screen`, which is `/home` (the example sets it in
+// example/lib/main.dart).
 //
 // `--upgrade-apk <apk>` adds the case that attribute exists for. After step 3
 // the second build is installed *over* the first, without clearing its data,
@@ -76,6 +78,11 @@ const String _extra = 'otel_crash';
 /// The attributes a native crash record uses for the build that crashed.
 const String _crashedVersion = 'otel_zone.crashed.service.version';
 const String _crashedBuild = 'otel_zone.crashed.app.build_id';
+
+/// The screen a native crash record names, and the one the example sets
+/// before its first frame (example/lib/main.dart, `setCrashScreen`).
+const String _crashedScreen = 'otel_zone.crashed.screen';
+const String _expectedScreen = '/home';
 
 /// The app's start-up summary, which `start()` logs once the drain has made
 /// the crash durable and acknowledged it, and the spool has been replayed. It
@@ -822,6 +829,11 @@ class _KindRun {
           r.resource['app.build_id'] == resourceBuild,
           'launch 2: resource app.build_id is ${r.resource['app.build_id']}, '
           'expected $resourceBuild',
+        );
+        _expect(
+          r.attributes[_crashedScreen] == _expectedScreen,
+          'launch 2: $_crashedScreen is ${r.attributes[_crashedScreen]}, '
+          'expected $_expectedScreen',
         );
       }
       final String event = kind == 'anr' ? 'device.anr' : 'device.crash';

@@ -247,4 +247,11 @@ final class MetricKitPayloadMapperTests: XCTestCase {
 
     XCTAssertEqual(stack?.split(separator: "\n").count, 241)
   }
+
+  func testThePidIsReadAndStillExportedAsMetadata() throws {
+    let mapped = try XCTUnwrap(map("crash-sigsegv").first)
+
+    XCTAssertEqual(mapped.pid, 811)
+    XCTAssertEqual(mapped.record.attributes?["metrickit.meta.pid"], "811")
+  }
 }

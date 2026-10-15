@@ -47,6 +47,12 @@ final OtelZone observability = OtelZone(
 Future<void> main() => observability.runGuarded(() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // A real app calls this on every navigation, with the route pattern. It is
+  // safe before `start()` (but not before the binding above), and it comes
+  // first here so that a slow start cannot let the crash harness's crash beat
+  // it. The harness checks that a native crash record names it.
+  observability.setCrashScreen('/home');
+
   // In a real app these come from `package_info_plus` and
   // `device_info_plus`, read off the installed artifact — never
   // hardcoded, or every build ever shipped reports the same identity.

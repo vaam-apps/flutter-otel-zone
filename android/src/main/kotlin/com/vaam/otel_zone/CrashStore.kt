@@ -58,6 +58,13 @@ internal class CrashStore(
      * [AppBuild].
      */
     build: AppBuild = AppBuild.UNKNOWN,
+    /**
+     * The screen the app is showing right now, read at the throw and written
+     * into the report when it is known. A provider, not a value, so that the
+     * report carries the screen of the moment it was written; a provider that
+     * throws costs the screen, never the report.
+     */
+    private val screen: () -> String? = { null },
 ) : JvmCrashRecorder {
 
     private val buildAttributes: Map<String, String> = build.attributes()
@@ -68,6 +75,11 @@ internal class CrashStore(
         directory.mkdirs()
         sweepTemps()
         val id = nextId()
+        val screenNow = try {
+            screen()
+        } catch (_: Throwable) {
+            null
+        }
 
         val report = JSONObject()
             .put("id", id)
@@ -84,6 +96,7 @@ internal class CrashStore(
                     .put("process.pid", pid().toString())
                     .also { attributes ->
                         buildAttributes.forEach { (key, value) -> attributes.put(key, value) }
+                        screenNow?.let { attributes.put(CrashScreen.ATTRIBUTE, it) }
                     },
             )
 

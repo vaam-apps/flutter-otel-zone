@@ -40,6 +40,7 @@ struct Harness {
   let exceptions: CrashFileStore
   let ledger: AcknowledgedExceptionLedger
   let ledgerFile: URL
+  let screens: RunScreenLog
   let repository: NativeCrashRepository
 
   init(maxFiles: Int = 16, clock: TestClock = TestClock()) {
@@ -55,11 +56,23 @@ struct Harness {
     try! exceptions.prepareDirectory()
     ledgerFile = root.appendingPathComponent("acknowledged-exceptions.json")
     ledger = AcknowledgedExceptionLedger(file: ledgerFile, now: { clock.now })
+    screens = RunScreenLog(
+      directory: root.appendingPathComponent("screens"), pid: 1, launchedAt: clock.now,
+      now: { clock.now })
     repository = NativeCrashRepository(
-      metricKit: metricKit, exceptions: exceptions, ledger: ledger)
+      metricKit: metricKit, exceptions: exceptions, ledger: ledger, screens: screens)
   }
 
   func cleanUp() { try? FileManager.default.removeItem(at: root) }
+
+  /// Writes a run's last screen the way that run writes it: the run log of a
+  /// process with [pid] that was launched at [launchedAt].
+  func writeRun(pid: Int32, launchedAt: Date, screen: String?) {
+    let directory = root.appendingPathComponent("screens")
+    let clock = self.clock
+    RunScreenLog(directory: directory, pid: pid, launchedAt: launchedAt, now: { clock.now })
+      .record(screen)
+  }
 
   /// Writes an `NSException` report the way the handler does, at [unixSeconds].
   @discardableResult
@@ -67,11 +80,12 @@ struct Harness {
     name: String = "NSRangeException", reason: String? = "x",
     symbols: [String] = ["0 App 0x1 main"],
     build: AppBuild = .unknown,
+    screen: String? = nil,
     at unixSeconds: TimeInterval
   ) -> String {
     let exception = NSException(name: NSExceptionName(name), reason: reason, userInfo: nil)
     let data = try! NSExceptionSource.encode(
-      exception, now: Date(timeIntervalSince1970: unixSeconds), build: build)
+      exception, now: Date(timeIntervalSince1970: unixSeconds), build: build, screen: screen)
     // `encode` reads callStackSymbols, which is empty for an exception that
     // was never raised, so the symbols are patched in.
     var json = try! JSONSerialization.jsonObject(with: data) as! [String: Any]

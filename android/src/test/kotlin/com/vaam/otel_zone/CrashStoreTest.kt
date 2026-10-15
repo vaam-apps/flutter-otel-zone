@@ -18,7 +18,11 @@ class CrashStoreTest {
     /** Shorter than the production five minutes, so tests stay readable. */
     private val staleWindow = 60_000L
 
-    private fun store(maxReports: Int = 16, build: AppBuild = AppBuild.UNKNOWN): CrashStore =
+    private fun store(
+        maxReports: Int = 16,
+        build: AppBuild = AppBuild.UNKNOWN,
+        screen: () -> String? = { null },
+    ): CrashStore =
         CrashStore(
             directory = directory,
             maxReports = maxReports,
@@ -27,6 +31,7 @@ class CrashStoreTest {
             pid = { PID },
             sessionId = SESSION,
             build = build,
+            screen = screen,
         )
 
     @AfterTest
@@ -85,6 +90,35 @@ class CrashStoreTest {
 
         assertFalse(attributes.containsKey("otel_zone.crashed.service.version"))
         assertFalse(attributes.containsKey("otel_zone.crashed.app.build_id"))
+    }
+
+    @Test
+    fun `a report carries the screen that was current when it was written`() {
+        store(screen = { "/orders/:id" }).record(Thread.currentThread(), RuntimeException("boom"))
+
+        val attributes = store().pending().single().attributes.orEmpty()
+
+        assertEquals("/orders/:id", attributes["otel_zone.crashed.screen"])
+    }
+
+    @Test
+    fun `a report written with no screen has no screen attribute`() {
+        store().record(Thread.currentThread(), RuntimeException("boom"))
+
+        val attributes = store().pending().single().attributes.orEmpty()
+
+        assertFalse(attributes.containsKey("otel_zone.crashed.screen"))
+    }
+
+    @Test
+    fun `a screen provider that throws still writes the report`() {
+        store(screen = { throw IllegalStateException("not yet") })
+            .record(Thread.currentThread(), RuntimeException("kept"))
+
+        val report = store().pending().single()
+
+        assertEquals("kept", report.message)
+        assertFalse(report.attributes.orEmpty().containsKey("otel_zone.crashed.screen"))
     }
 
     @Test

@@ -47,6 +47,17 @@ import Foundation
 /// binary UUIDs and offsets — the symbolicatable ones — and a backend can
 /// collapse a tagged record, where a dropped one is simply gone. Acknowledging
 /// the tagged report forgets the ledger entry it explained.
+///
+/// ## The screen
+///
+/// A crash record names the screen the app was showing, as
+/// `otel_zone.crashed.screen`, by one of two routes. The `NSException` report
+/// carries the screen the handler read at the throw, and that one wins when the
+/// record is merged. A MetricKit crash takes the screen of the one run with its
+/// pid whose launch falls in the payload's window (`RunScreenLog`), and a
+/// diagnostic that matches no run, or several, has none. A hang never has one:
+/// the process lived on, so the run's last screen is not the screen during the
+/// hang.
 final class NativeCrashRepository {
   /// How far outside a payload's window an exception may fall and still be
   /// matched, for clocks that disagree by a little.
@@ -60,14 +71,19 @@ final class NativeCrashRepository {
   private let metricKit: CrashFileStore
   private let exceptions: CrashFileStore
   private let ledger: AcknowledgedExceptionLedger
+  private let screens: RunScreenLog?
   private let lock = NSLock()
 
+  /// [screens] is the run log a MetricKit crash is matched against. `nil`
+  /// leaves every MetricKit crash without a screen.
   init(
-    metricKit: CrashFileStore, exceptions: CrashFileStore, ledger: AcknowledgedExceptionLedger
+    metricKit: CrashFileStore, exceptions: CrashFileStore, ledger: AcknowledgedExceptionLedger,
+    screens: RunScreenLog? = nil
   ) {
     self.metricKit = metricKit
     self.exceptions = exceptions
     self.ledger = ledger
+    self.screens = screens
   }
 
   /// Persists a payload's JSON as delivered, before anything reads it.
@@ -127,7 +143,12 @@ final class NativeCrashRepository {
 
     let merged = Self.merge(
       diagnostics: diagnostics, exceptions: reports,
-      acknowledged: ledger.entries().map(\.asReport))
+      acknowledged: ledger.entries().map(\.asReport),
+      screenOf: { diagnostic in
+        guard diagnostic.isCrash, let pid = diagnostic.pid else { return nil }
+        return self.screens?.screen(
+          pid: pid, windowStart: diagnostic.windowStart, windowEnd: diagnostic.windowEnd)
+      })
     return merged.sorted { ($0.timestampMicros, $0.id) < ($1.timestampMicros, $1.id) }
   }
 
@@ -182,9 +203,14 @@ final class NativeCrashRepository {
   // MARK: - Merge
 
   /// The merge rule, on already-read inputs so a test can drive it directly.
+  ///
+  /// [screenOf] gives the screen of a crash diagnostic from outside the
+  /// payload (in the repository, the run log). It is asked only of a crash, and
+  /// the exception report's own screen wins over it.
   static func merge(
     diagnostics: [MappedDiagnostic], exceptions: [NSExceptionReport],
-    acknowledged: [NSExceptionReport] = []
+    acknowledged: [NSExceptionReport] = [],
+    screenOf: (MappedDiagnostic) -> String? = { _ in nil }
   ) -> [CrashRecord] {
     var consumed = Set<Int>()
     var output: [CrashRecord] = []
@@ -193,7 +219,11 @@ final class NativeCrashRepository {
     for report in exceptions {
       if let pair = merged.first(where: { $0.report.id == report.id }) {
         consumed.insert(pair.diagnostic)
-        output.append(combine(diagnostics[pair.diagnostic], report))
+        let diagnostic = diagnostics[pair.diagnostic]
+        output.append(
+          combine(
+            diagnostic, report,
+            screen: report.screen ?? screenOf(diagnostic)))
       } else {
         output.append(report.record)
       }
@@ -214,6 +244,11 @@ final class NativeCrashRepository {
         var attributes = record.attributes ?? [:]
         attributes[duplicateOfAttribute] = original
         attributes[lateMetricKitAttribute] = "true"
+        record.attributes = attributes
+      }
+      if diagnostic.isCrash, let screen = screenOf(diagnostic) {
+        var attributes = record.attributes ?? [:]
+        attributes[CrashScreen.attribute] = screen
         record.attributes = attributes
       }
       output.append(record)
@@ -271,9 +306,9 @@ final class NativeCrashRepository {
     return false
   }
 
-  private static func combine(_ diagnostic: MappedDiagnostic, _ report: NSExceptionReport)
-    -> CrashRecord
-  {
+  private static func combine(
+    _ diagnostic: MappedDiagnostic, _ report: NSExceptionReport, screen: String?
+  ) -> CrashRecord {
     var record = diagnostic.record
     record.id = diagnostic.record.id + String(mergedSeparator) + report.id
     record.kind = CrashKind.nsexception
@@ -296,6 +331,9 @@ final class NativeCrashRepository {
     // diagnostic's own field. Where it does not (a report from before it was
     // recorded), MetricKit's stays.
     attributes.merge(report.appBuild.attributes) { _, fromReport in fromReport }
+    if let screen = screen {
+      attributes[CrashScreen.attribute] = screen
+    }
     record.attributes = attributes
     return record
   }

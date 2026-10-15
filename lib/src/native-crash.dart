@@ -126,6 +126,16 @@ class NativeCrashDrain {
   /// absence rule.
   static const String crashedBuildId = 'otel_zone.crashed.app.build_id';
 
+  /// The screen the app showed when it died, on a native crash record: the
+  /// route pattern [OtelZone.setCrashScreen] was last given in that process.
+  ///
+  /// It is the app's own text, so [NativeCrashDrain] scrubs it with `redact`
+  /// like every other attribute, and drops it when nothing is left. The
+  /// platform writes it only when it knows the screen (see the README's "Which
+  /// screen it died on"), and never fills it in with the screen of this
+  /// launch.
+  static const String crashedScreen = 'otel_zone.crashed.screen';
+
   /// Deliveries still running after [drain] returned, so a test can wait.
   final Set<Future<void>> _background = <Future<void>>{};
 
@@ -357,9 +367,10 @@ class NativeCrashDrain {
               in report.attributes!.entries)
             attribute.key: _scrub(attribute.value) ?? '',
       };
-      // The crashed build is either known or absent: a platform that has
-      // nothing to say must not leave an empty string that reads as a value.
-      for (final String key in _crashedBuildKeys) {
+      // The crashed build and screen are either known or absent: a platform
+      // that has nothing to say must not leave an empty string that reads as a
+      // value, and a screen that redaction emptied is no screen.
+      for (final String key in _crashedKeys) {
         if (attributes[key] case final String value when value.trim().isEmpty) {
           attributes.remove(key);
         }
@@ -392,9 +403,10 @@ class NativeCrashDrain {
     }
   }
 
-  static const List<String> _crashedBuildKeys = <String>[
+  static const List<String> _crashedKeys = <String>[
     crashedServiceVersion,
     crashedBuildId,
+    crashedScreen,
   ];
 
   String? _scrub(String? value) {

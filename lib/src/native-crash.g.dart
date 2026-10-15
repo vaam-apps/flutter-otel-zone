@@ -300,3 +300,45 @@ class NativeCrashApi {
     );
   }
 }
+
+/// Tells the platform which screen the app shows, so that the record of a native death,
+/// read on the next launch, can name it.
+class CrashContextApi {
+  /// Constructor for [CrashContextApi]. The [binaryMessenger] named argument is
+  /// available for dependency injection. If it is left null, the default
+  /// BinaryMessenger will be used which routes to the host platform.
+  CrashContextApi({
+    BinaryMessenger? binaryMessenger,
+    String messageChannelSuffix = '',
+  }) : pigeonVar_binaryMessenger = binaryMessenger,
+       pigeonVar_messageChannelSuffix = messageChannelSuffix.isNotEmpty
+           ? '.$messageChannelSuffix'
+           : '';
+
+  final BinaryMessenger? pigeonVar_binaryMessenger;
+  static const MessageCodec<Object?> pigeonChannelCodec = _PigeonCodec();
+
+  final String pigeonVar_messageChannelSuffix;
+
+  /// Records [screen] (a route pattern, at most 64 UTF-8 bytes; null clears it) as the screen
+  /// this process shows. Runs on a serial background queue: the platform thread only dispatches.
+  Future<void> setCrashScreen(String? screen) async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.otel_zone.CrashContextApi.setCrashScreen$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(
+      <Object?>[screen],
+    );
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: true,
+    );
+  }
+}

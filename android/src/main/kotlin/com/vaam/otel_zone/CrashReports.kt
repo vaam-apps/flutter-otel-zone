@@ -23,7 +23,9 @@ import kotlin.math.abs
  * broken by id, and one report joins at most one exit record.
  *
  * The joined record keeps the JVM report's content (its trace is the point)
- * and takes the exit record's id, the session and the exit attributes. Its
+ * and takes the exit record's id, the session and the exit attributes, except
+ * the screen: the dying process wrote the screen it was showing at the throw,
+ * so the JVM report's value wins over the exit record's. Its
  * id is the exit record's, because that is what has to be acknowledged for
  * the OS watermark to move; acknowledging it deletes the JVM file it
  * absorbed, found again by the same rule. A JVM report with no exit record —
@@ -82,8 +84,12 @@ internal class CrashReports(
         store.acknowledge(jvmIds)
     }
 
-    private fun merge(jvm: NativeCrashReport, exit: NativeCrashReport): NativeCrashReport =
-        NativeCrashReport(
+    private fun merge(jvm: NativeCrashReport, exit: NativeCrashReport): NativeCrashReport {
+        val attributes = (jvm.attributes.orEmpty() + exit.attributes.orEmpty()).toMutableMap()
+        // The dying process wrote its screen at the throw. The OS's copy comes
+        // from a summary that may be older, so where the report has one it wins.
+        jvm.attributes?.get(CrashScreen.ATTRIBUTE)?.let { attributes[CrashScreen.ATTRIBUTE] = it }
+        return NativeCrashReport(
             id = exit.id,
             kind = jvm.kind,
             timestampMicros = jvm.timestampMicros,
@@ -92,8 +98,9 @@ internal class CrashReports(
             stacktrace = jvm.stacktrace,
             threads = jvm.threads,
             sessionId = exit.sessionId ?: jvm.sessionId,
-            attributes = (jvm.attributes.orEmpty() + exit.attributes.orEmpty()),
+            attributes = attributes,
         )
+    }
 
     companion object {
         /**
