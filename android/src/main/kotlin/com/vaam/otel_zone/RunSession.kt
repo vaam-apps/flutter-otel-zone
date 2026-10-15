@@ -29,12 +29,14 @@ internal object RunSession {
      * What a process's summary says about its run.
      *
      * Every part but the session is optional, and a summary written before
-     * the build was recorded (see [decodeTag]) has only the session.
+     * the build was recorded (see [decodeTag]) has only the session. The
+     * [screen] is absent in every summary written before it was recorded.
      */
     class Tag(
         val sessionId: String?,
         val versionName: String?,
         val buildId: String?,
+        val screen: String? = null,
     )
 
     /**
@@ -46,30 +48,50 @@ internal object RunSession {
      *
      *     0x01 | len | session id | len | versionName | len | buildId
      *
+     * **Format 2** is format 1 with one more field, the screen, after the build
+     * id, and the first byte is 0x02:
+     *
+     *     0x02 | len | session id | len | versionName | len | buildId | len | screen
+     *
      * Each `len` is one byte, and each field is UTF-8 (the build id is decimal
-     * digits). A field that is not known is written with length 0. The first
-     * byte is what tells this from a **legacy** summary, which is the bare
-     * session id as text: text never starts with 0x01.
+     * digits). A field that is not known is written with length 0. A summary
+     * with no screen is format 1, byte for byte what the previous release
+     * wrote. The first byte is what tells this from a **legacy** summary, which
+     * is the bare session id as text: text never starts with 0x01 or 0x02.
      *
      * The limit is enforced here, not hoped for. When everything does not fit,
-     * the version is left out first and the build id second; a value is never
-     * truncated, because a cut version is a wrong one.
+     * the screen is left out first, then the version, then the build id; a value
+     * is never truncated, because a cut version or a cut route is a wrong one.
      */
-    fun encode(sessionId: String, build: AppBuild = AppBuild.UNKNOWN): ByteArray {
+    fun encode(
+        sessionId: String,
+        build: AppBuild = AppBuild.UNKNOWN,
+        screen: String? = null,
+    ): ByteArray {
         val session = sessionId.toByteArray(Charsets.UTF_8)
         require(session.size in 1..MAX_SESSION_ID_BYTES) { "session id is ${session.size} bytes" }
         var version = build.versionName?.toByteArray(Charsets.UTF_8) ?: ByteArray(0)
         var buildId = build.buildId?.toByteArray(Charsets.UTF_8) ?: ByteArray(0)
+        var named = CrashScreen.clean(screen)?.toByteArray(Charsets.UTF_8) ?: ByteArray(0)
 
-        fun size() = 1 + (1 + session.size) + (1 + version.size) + (1 + buildId.size)
+        fun size() =
+            1 + (1 + session.size) + (1 + version.size) + (1 + buildId.size) +
+                (if (named.isEmpty()) 0 else 1 + named.size)
         if (version.size > MAX_VERSION_BYTES) version = ByteArray(0)
         if (buildId.size > MAX_BUILD_ID_BYTES) buildId = ByteArray(0)
+        if (size() > MAX_SUMMARY_BYTES) named = ByteArray(0)
         if (size() > MAX_SUMMARY_BYTES) version = ByteArray(0)
         if (size() > MAX_SUMMARY_BYTES) buildId = ByteArray(0)
 
+        val fields = if (named.isEmpty()) {
+            listOf(session, version, buildId)
+        } else {
+            listOf(session, version, buildId, named)
+        }
+        val format = if (named.isEmpty()) FORMAT_1 else FORMAT_2
         val out = java.io.ByteArrayOutputStream(size())
-        out.write(FORMAT_1.toInt())
-        for (field in listOf(session, version, buildId)) {
+        out.write(format.toInt())
+        for (field in fields) {
             out.write(field.size)
             out.write(field)
         }
@@ -86,23 +108,26 @@ internal object RunSession {
      * What a summary says about its run, or `null` when it is not one of ours.
      *
      * The bytes come from the OS but any app code can also write them, so
-     * they are read as untrusted. Two shapes are accepted: the current
-     * [encode] format, and the legacy bare session id. A summary that is
-     * neither, or whose structure does not add up, is `null`. Inside a
-     * well-formed summary a field that does not look like what it should
-     * (a version with control characters, a build id that is not digits) is
-     * absent rather than exported. Nothing here guesses: a legacy summary has
-     * no build, and that means *unknown*, never the current one.
+     * they are read as untrusted. Three shapes are accepted: format 1 and
+     * format 2 of [encode], and the legacy bare session id. A summary that is
+     * none of these, or whose structure does not add up (a format 2 summary
+     * without its screen field counts), is `null`. Inside a well-formed
+     * summary a field that does not look like what it should (a version with
+     * control characters, a build id that is not digits, a screen that is not
+     * [CrashScreen.clean]) is absent rather than exported. Nothing here guesses:
+     * a legacy summary has no build and no screen, and that means *unknown*,
+     * never the current one.
      */
     fun decodeTag(summary: ByteArray?): Tag? {
         if (summary == null || summary.isEmpty() || summary.size > MAX_SUMMARY_BYTES) return null
-        if (summary[0] != FORMAT_1) {
+        if (summary[0] != FORMAT_1 && summary[0] != FORMAT_2) {
             val text = String(summary, Charsets.UTF_8)
             return text.takeIf { SESSION_ID.matches(it) }?.let { Tag(it, null, null) }
         }
+        val fieldCount = if (summary[0] == FORMAT_2) FORMAT_2_FIELD_COUNT else FIELD_COUNT
         var offset = 1
-        val fields = ArrayList<ByteArray>(FIELD_COUNT)
-        repeat(FIELD_COUNT) {
+        val fields = ArrayList<ByteArray>(fieldCount)
+        repeat(fieldCount) {
             if (offset >= summary.size) return null
             val length = summary[offset++].toInt() and 0xff
             if (offset + length > summary.size) return null
@@ -114,7 +139,12 @@ internal object RunSession {
         val session = strictText(fields[0])?.takeIf { SESSION_ID.matches(it) } ?: return null
         val version = strictText(fields[1])?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) }
         val buildId = strictText(fields[2])?.takeIf { BUILD_ID.matches(it) }
-        return Tag(session, version, buildId)
+        val screen = if (fieldCount == FORMAT_2_FIELD_COUNT) {
+            strictText(fields[3])?.let { CrashScreen.clean(it) }
+        } else {
+            null
+        }
+        return Tag(session, version, buildId, screen)
     }
 
     /** UTF-8 that is exactly UTF-8: malformed input is `null`, not U+FFFD. */
@@ -130,8 +160,8 @@ internal object RunSession {
         }
 
     /**
-     * Writes [sessionId] and [build] as this process's summary. Returns
-     * whether it did.
+     * Writes [sessionId], [build] and [screen] as this process's summary.
+     * Returns whether it did.
      *
      * [setSummary] is `ActivityManager.setProcessStateSummary`, passed in so
      * the API gate and the failure handling can be tested. It is only called
@@ -142,11 +172,12 @@ internal object RunSession {
         sdkInt: Int = Build.VERSION.SDK_INT,
         sessionId: String = id,
         build: AppBuild = AppBuild.UNKNOWN,
+        screen: String? = null,
         setSummary: (ByteArray) -> Unit,
     ): Boolean {
         if (sdkInt < Build.VERSION_CODES.R) return false
         return try {
-            setSummary(encode(sessionId, build))
+            setSummary(encode(sessionId, build, screen))
             true
         } catch (_: Exception) {
             false
@@ -157,7 +188,9 @@ internal object RunSession {
     const val MAX_SUMMARY_BYTES = 128
 
     private const val FORMAT_1: Byte = 1
+    private const val FORMAT_2: Byte = 2
     private const val FIELD_COUNT = 3
+    private const val FORMAT_2_FIELD_COUNT = 4
     private const val MAX_SESSION_ID_BYTES = 64
     private const val MAX_VERSION_BYTES = 64
     private const val MAX_BUILD_ID_BYTES = 20

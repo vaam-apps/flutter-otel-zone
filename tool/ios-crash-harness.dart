@@ -17,7 +17,9 @@
 //
 // The recovered record must also say which build died
 // (`otel_zone.crashed.service.version` and `otel_zone.crashed.app.build_id`,
-// read by the plugin from the crashing process's Info.plist). `--upgrade-app
+// read by the plugin from the crashing process's Info.plist), and the screen
+// it died on (`otel_zone.crashed.screen`, which is `/home`, as the example sets
+// it in example/lib/main.dart). `--upgrade-app
 // <Runner.app>` installs a second build over the first between steps 2 and 3,
 // keeping the app's data, and then also requires the record's resource to name
 // the new build while the crashed-build attributes still name the old one. Build
@@ -115,6 +117,11 @@ Future<void> main(List<String> arguments) async {
 /// The attributes a native crash record uses for the build that crashed.
 const String _crashedVersion = 'otel_zone.crashed.service.version';
 const String _crashedBuild = 'otel_zone.crashed.app.build_id';
+
+/// The screen a native crash record names, and the one the example sets
+/// before its first frame (example/lib/main.dart, `setCrashScreen`).
+const String _crashedScreen = 'otel_zone.crashed.screen';
+const String _expectedScreen = '/home';
 
 class _Run {
   _Run(
@@ -235,6 +242,11 @@ class _Run {
           r.resource['app.build_id'] == resourceBuild,
           'launch 2: resource app.build_id is ${r.resource['app.build_id']}, '
           'expected $resourceBuild',
+        );
+        _expect(
+          r.attributes[_crashedScreen] == _expectedScreen,
+          'launch 2: $_crashedScreen is ${r.attributes[_crashedScreen]}, '
+          'expected $_expectedScreen',
         );
       }
       await _terminate();

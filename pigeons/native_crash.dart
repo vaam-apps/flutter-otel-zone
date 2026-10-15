@@ -92,3 +92,13 @@ abstract class NativeCrashApi {
   @async
   void acknowledge(List<String> ids);
 }
+
+/// Tells the platform which screen the app shows, so that the record of a native death,
+/// read on the next launch, can name it.
+@HostApi()
+abstract class CrashContextApi {
+  /// Records [screen] (a route pattern, at most 64 UTF-8 bytes; null clears it) as the screen
+  /// this process shows. Runs on a serial background queue: the platform thread only dispatches.
+  @TaskQueue(type: TaskQueueType.serialBackgroundThread)
+  void setCrashScreen(String? screen);
+}

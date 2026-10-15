@@ -321,4 +321,50 @@ final class NativeCrashRepositoryTests: XCTestCase {
     XCTAssertNotEqual(a, b)
     XCTAssertEqual(harness.metricKit.ids(), [a, b].sorted())
   }
+
+  // MARK: - The screen
+
+  func testAMetricKitCrashCarriesTheScreenOfTheRunWithItsPid() throws {
+    // crash-sigsegv covers 08:00-10:30 UTC on 2026-09-28 and has pid 811.
+    persist("crash-sigsegv")
+    let windowStart = Date(timeIntervalSince1970: 1_790_582_400)
+    harness.writeRun(
+      pid: 811, launchedAt: windowStart.addingTimeInterval(600), screen: "/orders/:id")
+
+    let report = try XCTUnwrap(harness.repository.pending().first)
+
+    XCTAssertEqual(report.attributes?[CrashScreen.attribute], "/orders/:id")
+  }
+
+  func testAMetricKitCrashWithNoMatchingRunHasNoScreen() throws {
+    persist("crash-sigsegv")
+
+    let report = try XCTUnwrap(harness.repository.pending().first)
+
+    XCTAssertNil(report.attributes?[CrashScreen.attribute])
+  }
+
+  func testAHangNeverCarriesAScreen() {
+    let diagnostics = MetricKitPayloadMapper.map(
+      data: fixture("hang"), fileId: "mx-0000001790600000000-0000",
+      receivedAt: Date(timeIntervalSince1970: 1_790_600_000))
+
+    let records = NativeCrashRepository.merge(
+      diagnostics: diagnostics, exceptions: [], screenOf: { _ in "/x" })
+
+    XCTAssertFalse(records.isEmpty)
+    for record in records {
+      XCTAssertNil(record.attributes?[CrashScreen.attribute], record.id)
+    }
+  }
+
+  func testAMergedRecordKeepsTheExceptionsScreen() throws {
+    persist("crash-abort")
+    harness.writeException(reason: "x", screen: "/exception", at: ten)
+
+    let report = try XCTUnwrap(harness.repository.pending().first)
+
+    XCTAssertEqual(report.kind, "nsexception")
+    XCTAssertEqual(report.attributes?[CrashScreen.attribute], "/exception")
+  }
 }

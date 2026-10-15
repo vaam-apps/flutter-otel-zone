@@ -201,4 +201,41 @@ final class NSExceptionSourceTests: XCTestCase {
 
     XCTAssertEqual(AppBuild.read(from: try XCTUnwrap(Bundle(url: bundleDirectory))), .unknown)
   }
+
+
+  // MARK: - The screen
+
+  func testTheHandlerWritesTheScreenCurrentWhenTheExceptionFires() throws {
+    NSExceptionSource.install(store: store, screen: { "/orders/:id" })
+
+    try fire(NSException(name: .rangeException, reason: "x", userInfo: nil))
+
+    let attributes = try onlyReport().record.attributes
+    XCTAssertEqual(attributes?[CrashScreen.attribute], "/orders/:id")
+  }
+
+  func testAReportWithNoScreenHasNoScreenAttribute() throws {
+    NSExceptionSource.install(store: store, screen: { nil })
+
+    try fire(NSException(name: .rangeException, reason: "x", userInfo: nil))
+
+    let attributes = try onlyReport().record.attributes
+    XCTAssertNil(attributes?[CrashScreen.attribute])
+  }
+
+  func testABlankOverlongOrMistypedScreenInAReportIsDropped() throws {
+    let values: [Any] = ["   ", String(repeating: "x", count: 65), "/a\nb", 42]
+    for value in values {
+      let object: [String: Any] = [
+        "name": "NSRangeException",
+        "reason": "x",
+        "callStackSymbols": [String](),
+        "timestampMicros": 1_790_600_000_000_000,
+        "screen": value,
+      ]
+      let data = try JSONSerialization.data(withJSONObject: object)
+      let report = try XCTUnwrap(NSExceptionReport.decode(id: "ns-x", data: data))
+      XCTAssertNil(report.screen, "\(value)")
+    }
+  }
 }

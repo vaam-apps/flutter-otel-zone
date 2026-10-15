@@ -26,17 +26,28 @@ enum NSExceptionSource {
   /// that is running is the one that crashes, and the handler must not go and
   /// look it up while the process is aborting.
   private static var appBuild = AppBuild.unknown
+  /// Asked at the throw, so it must be cheap and must not throw. Fixed at install
+  /// like the build: the handler does not go looking for anything while the
+  /// process is aborting.
+  private static var screen: () -> String? = { nil }
   private static var previous: NSUncaughtExceptionHandler?
   private static var installed = false
   private static let installLock = NSLock()
 
   /// Installs the handler in front of whatever is installed now.
   ///
+  /// [screen] is asked at the throw for the screen the app is showing, and
+  /// written into the report when it knows one.
+  ///
   /// Idempotent: `register(with:)` runs once per Flutter engine, and a second
   /// install would chain the handler to itself and write every report twice.
   /// Never throws — a store that cannot be prepared means no reports, and the
   /// app carries on exactly as it would without this package.
-  static func install(store: CrashFileStore, appBuild: AppBuild = .read()) {
+  static func install(
+    store: CrashFileStore,
+    appBuild: AppBuild = .read(),
+    screen: @escaping () -> String? = { CrashScreen.shared.current }
+  ) {
     installLock.lock()
     defer { installLock.unlock() }
     guard !installed else { return }
@@ -48,6 +59,7 @@ enum NSExceptionSource {
 
     self.store = store
     self.appBuild = appBuild
+    self.screen = screen
     self.previous = NSGetUncaughtExceptionHandler()
     installed = true
     NSSetUncaughtExceptionHandler { exception in
@@ -68,6 +80,7 @@ enum NSExceptionSource {
     NSSetUncaughtExceptionHandler(nil)
     store = nil
     appBuild = .unknown
+    screen = { nil }
     previous = nil
     installed = false
   }
@@ -80,7 +93,7 @@ enum NSExceptionSource {
     // would have — a changed crash UX is worse than a lost report.
     if let store {
       do {
-        try store.write(encode(exception, build: appBuild))
+        try store.write(encode(exception, build: appBuild, screen: screen()))
       } catch {
         // Nowhere to report a failure to: the process is aborting.
       }
@@ -89,7 +102,8 @@ enum NSExceptionSource {
   }
 
   static func encode(
-    _ exception: NSException, now: Date = Date(), build: AppBuild = .unknown
+    _ exception: NSException, now: Date = Date(), build: AppBuild = .unknown,
+    screen: String? = nil
   ) throws -> Data {
     let symbols = exception.callStackSymbols.prefix(maxSymbols)
     var object: [String: Any] = [
@@ -102,6 +116,7 @@ enum NSExceptionSource {
     // also what a report from before this was written means.
     if let version = build.version { object["appVersion"] = version }
     if let number = build.build { object["appBuild"] = number }
+    if let screen = screen { object["screen"] = screen }
     return try JSONSerialization.data(withJSONObject: object)
   }
 }
@@ -116,6 +131,8 @@ struct NSExceptionReport: Equatable {
   /// The build that threw, as the handler read it at install time. `nil` for
   /// a report written before it was recorded, which must stay unknown.
   var appBuild = AppBuild.unknown
+  /// The screen the app was showing when it threw, or `nil` when it named none.
+  var screen: String? = nil
 
   /// The report in [data], or `nil` when this build cannot read it.
   static func decode(id: String, data: Data) -> NSExceptionReport? {
@@ -131,11 +148,18 @@ struct NSExceptionReport: Equatable {
       symbols: (json["callStackSymbols"] as? [Any])?.compactMap { $0 as? String } ?? [],
       timestampMicros: timestamp,
       appBuild: AppBuild(
-        version: AppBuild.clean(json["appVersion"]), build: AppBuild.clean(json["appBuild"])))
+        version: AppBuild.clean(json["appVersion"]), build: AppBuild.clean(json["appBuild"])),
+      screen: CrashScreen.clean(json["screen"]))
   }
 
   var record: CrashRecord {
-    CrashRecord(
+    var attributes = ["crash.source": "nsexception"].merging(appBuild.attributes) { current, _ in
+      current
+    }
+    if let screen = screen {
+      attributes[CrashScreen.attribute] = screen
+    }
+    return CrashRecord(
       id: id,
       kind: CrashKind.nsexception,
       timestampMicros: timestampMicros,
@@ -144,8 +168,6 @@ struct NSExceptionReport: Equatable {
       stacktrace: symbols.isEmpty ? nil : symbols.joined(separator: "\n"),
       threads: nil,
       sessionId: nil,
-      attributes: ["crash.source": "nsexception"].merging(appBuild.attributes) { current, _ in
-        current
-      })
+      attributes: attributes)
   }
 }

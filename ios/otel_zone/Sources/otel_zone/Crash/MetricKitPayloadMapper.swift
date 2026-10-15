@@ -18,6 +18,10 @@ struct MappedDiagnostic {
   /// The crashing thread's frames, kept apart from `record.stacktrace` so
   /// the merge can replace the stack with the throw site and still keep this.
   var crashedThread: String?
+  /// The crashed process's pid, from the payload's metadata. It is what matches
+  /// the crash to the run that had it, and it is still exported as
+  /// `metrickit.meta.pid`. `nil` for a hang and for a payload without one.
+  var pid: Int? = nil
 }
 
 /// Maps the JSON of an `MXDiagnosticPayload` (`jsonRepresentation()`) to
@@ -162,7 +166,8 @@ enum MetricKitPayloadMapper {
       couldBeUncaughtException: reason != nil || isAbort,
       exceptionName: reason?.name,
       exceptionMessage: reason?.message,
-      crashedThread: crashed)
+      crashedThread: crashed,
+      pid: int(meta["pid"]))
   }
 
   // MARK: - Hang

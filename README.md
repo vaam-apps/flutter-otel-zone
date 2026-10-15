@@ -498,17 +498,25 @@ the app keeps on the phone.
 
 - **Android, an uncaught JVM exception.** One JSON report per exception in
   `noBackupFilesDir/otel_zone/crashes`: the exception's class, its raw
-  `message`, its raw stack trace, the thread's name, the process id and the
-  session id. (The OS's own `ApplicationExitInfo` record is read from the OS on
-  each launch and not copied; only a watermark is kept, in
-  `noBackupFilesDir/otel_zone`.)
+  `message`, its raw stack trace, the thread's name, the process id, the session
+  id and the screen the app was showing. (The OS's own `ApplicationExitInfo`
+  record is read from the OS on each launch and not copied; only a watermark is
+  kept, in `noBackupFilesDir/otel_zone`.)
+- **Android, the process state summary.** Not a file: the OS keeps it for the
+  process, up to 128 bytes, and hands it back with the exit record. It holds the
+  session id, the version, the build and the screen the app last showed. Nothing
+  is written to disk for it.
 - **iOS, MetricKit.** The `MXDiagnosticPayload`'s JSON, verbatim, in
   `Application Support/otel_zone/diagnostics/`, saved *before* it is parsed —
   crash and hang diagnostics, and whatever else the payload carries.
-- **iOS, an uncaught `NSException`.** Its name, reason and `callStackSymbols`
-  in `Application Support/otel_zone/exceptions/`, and a small ledger of
-  acknowledged reports (id, name, time) beside them. An exception's reason is
-  free text and often carries app data.
+- **iOS, an uncaught `NSException`.** Its name, reason, `callStackSymbols` and
+  the screen the app was showing, in `Application Support/otel_zone/exceptions/`,
+  and a small ledger of acknowledged reports (id, name, time) beside them. An
+  exception's reason is free text and often carries app data.
+- **iOS, the screen each run showed.** One small JSON file per run in
+  `Application Support/otel_zone/screens/`, holding the run's pid, its launch
+  time and its last screen. At most 64 are kept, and a run older than seven days
+  is removed.
 
 All of it is app-private and in no-backup storage: `noBackupFilesDir` on
 Android, and on iOS a directory marked `isExcludedFromBackup` (best effort: if
@@ -563,6 +571,104 @@ must treat "absent" as "unknown", not as "the current build".
 
 `redact` is applied to these attributes like any other, so a redactor that
 rewrites version-shaped strings would change them; leave them out of its rules.
+
+The screen a crash happened on is the same kind of attribute, and it is in its
+own section below.
+
+### Which screen it died on
+
+A native crash record can say which screen the app was showing when it died, as
+`otel_zone.crashed.screen`. The app says so with one call, on every navigation:
+
+```dart
+observability.setCrashScreen('/orders/:id'); // a pattern, never '/orders/1234?ref=mail'
+observability.setCrashScreen(null);
+```
+
+Pass the route **pattern**, the way the router names the page. Never a location
+with an id, a query or any user text in it. With fespalier,
+`FespalierOtel(onScreen: observability.setCrashScreen)` makes that call for
+every navigation, so the app does not write it by hand.
+
+The attribute is present only when the platform knows the screen. It is never
+guessed: a crash that names no screen is "unknown", not the screen of this
+launch. Live records never carry it, and a recovered crash is not stamped with
+the screen the app shows now, because it happened in an earlier launch. Where
+each kind of record gets its screen:
+
+| Source                                            | How it gets there                                       |
+| ------------------------------------------------- | ------------------------------------------------------- |
+| Android JVM                                       | in memory, written by the handler                       |
+| Android native, ANR, signal, low memory (API 30+) | process state summary                                   |
+| Android below API 30                              | JVM only                                                |
+| iOS `NSException`                                 | in memory, written by the handler                       |
+| iOS MetricKit crash                               | per-run file matched by pid, iOS 17+, exactly one match |
+| iOS hang                                          | never                                                   |
+| merged records                                    | the handler's value wins                                |
+
+**Limits.** A screen is trimmed, then kept if it is at most 64 UTF-8 bytes and
+holds no control character (U+0000 to U+001F, U+007F to U+009F). Anything else
+is `null`: it clears the previous value, and it is never cut to fit.
+
+On Android the process state summary is 128 bytes and holds the session, the
+version, the build and the screen. The session is never dropped. When the rest
+do not fit, the screen goes first, then the version, then the build. A summary
+that carries a screen starts with the byte `0x02`, and one without starts with
+`0x01`, which is byte for byte what 0.6.0 wrote. A 0.6.0 summary decodes with no
+screen. A build older than 0.7.0 cannot read a `0x02` summary, so the exit
+record it came from loses its session tag; the crash itself is still reported.
+
+**Cost.** `setCrashScreen` never throws and needs no SDK. It keeps the value in
+memory, and when the value changed it sends one message to the platform, on a
+serial background task queue, so the platform thread only dispatches it. At most
+one message is in flight. A change made while one is out is sent once it lands,
+and only the latest value is sent. On Android a change is one call to the OS
+(`setProcessStateSummary`), which the OS may refuse under rapid navigation; the
+next change tries again. On iOS a change is one small atomic write to the run's
+own file. Nothing is written to disk on Android for the screen, and there is no
+timer anywhere.
+
+**Where nothing is sent.** On the web and on desktop the call keeps the value and
+sends nothing. Under `flutter test` the default sink is none, so a test sends
+nothing unless it passes a `crashScreenSink`. A platform with no channel
+(`MissingPluginException`, or a `channel-error`) stops the forwarding for the
+process, quietly. Any other failure is warned about once, by its type, and never
+with the screen.
+
+**It is scrubbed like everything else.** The screen is app text, so
+`OtelZoneConfig.redact` scrubs it at export. It is **not** exempt, unlike
+`enduser.id`: a redactor that empties it removes the attribute, and a pattern
+that a redactor rewrites reaches the collector rewritten.
+
+**ANR, hang and background.** An Android ANR carries the last screen the
+platform received. The frozen main thread cannot navigate, so that is the screen
+the app was on when it froze. An iOS hang never carries a screen: the process
+lived on, and the run's last screen is not the screen during the hang. A kill in
+the background, by a signal or by the low-memory killer, carries the screen the
+app was left on.
+
+**iOS and MetricKit.** A MetricKit crash names only a pid and a time window. Each
+run keeps one small file of its pid, launch time and last screen (see "What the
+platforms store before Dart runs"). A crash takes the screen of the one run with
+its pid whose launch falls in the payload's window, from a day before it. Two
+runs with one pid, or none, mean no screen. This needs iOS 17 or later, where the
+payload carries the pid. An `NSException` report carries its own screen, which
+wins when the two are merged. At most 64 run files are kept, and a run older
+than seven days is removed.
+
+iOS 27's own MetricKit state reporting (`StateReportingDomain`) is the long-term
+replacement for those files. It needs the Xcode 27 SDK, so it is not built here,
+and it is a possible follow-up. The pid in the payload's metadata (`MXMetaData`)
+is deprecated from iOS 27.2, which is the other reason to plan for it.
+
+**Not yet checked on a device.** The Dart tests run anywhere. The Android and
+iOS tests and the crash harness run in CI on each pull request. Nothing has yet
+seen the screen on a phone: a native crash, an ANR and a background low-memory
+kill at API 30 to 36; the refusals of `setProcessStateSummary` under rapid
+navigation; an `NSException` on a simulator and on a device; a MetricKit crash
+matched by its pid up to a day later, and whether 64 files and seven days are
+enough; the iOS 26 and 27 payloads still carrying `pid`; and an iOS build before
+17, which has no screen at all.
 
 ### Crash harness
 
@@ -641,7 +747,9 @@ dart run tool/android-crash-harness.dart --device emulator-5554 --release-refusa
 cd example && flutter test integration_test -d emulator-5554   # channel is present, refuses an unknown kind
 ```
 
-Each recovered record must also carry the crashed-build attributes.
+Each recovered record must also carry the crashed-build attributes, and the
+screen it died on: `otel_zone.crashed.screen` is `/home`, which the example sets
+in `example/lib/main.dart` (see "Which screen it died on").
 `--upgrade-apk <apk>` adds the case they exist for: after the crash, a second
 build is installed **over** the first without clearing its data, and the record
 must then name the old build in `otel_zone.crashed.*` and the new one in its
@@ -801,6 +909,17 @@ and the start-up summary all become assertable with no SDK and no collector:
 ```dart
 final sink = RecordingTalkerObserver();
 final zone = OtelZone(config, sink: sink);
+```
+
+The screen `setCrashScreen` gives the platform goes to a `crashScreenSink`, and
+`RecordingCrashScreenSink` is its fake. Pass one as `crashScreenSink:` to see
+what the platform would have been told:
+
+```dart
+final crashScreen = RecordingCrashScreenSink();
+final zone = OtelZone(config, sink: sink, crashScreenSink: crashScreen);
+zone.setCrashScreen('/orders/:id');
+crashScreen.screens; // ['/orders/:id'], once the message has been sent
 ```
 
 `flutter test` in this repository is the whole contract above — the floor, the

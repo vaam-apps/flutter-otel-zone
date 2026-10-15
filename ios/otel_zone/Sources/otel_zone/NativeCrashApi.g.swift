@@ -381,3 +381,45 @@ class NativeCrashApiSetup {
     }
   }
 }
+/// Tells the platform which screen the app shows, so that the record of a native death,
+/// read on the next launch, can name it.
+///
+/// Generated protocol from Pigeon that represents a handler of messages from Flutter.
+protocol CrashContextApi {
+  /// Records [screen] (a route pattern, at most 64 UTF-8 bytes; null clears it) as the screen
+  /// this process shows. Runs on a serial background queue: the platform thread only dispatches.
+  func setCrashScreen(screen: String?) throws
+}
+
+/// Generated setup class from Pigeon to handle messages through the `binaryMessenger`.
+class CrashContextApiSetup {
+  static var codec: FlutterStandardMessageCodec { NativeCrashApiPigeonCodec.shared }
+  /// Sets up an instance of `CrashContextApi` to handle messages through the `binaryMessenger`.
+  static func setUp(binaryMessenger: FlutterBinaryMessenger, api: CrashContextApi?, messageChannelSuffix: String = "") {
+    let channelSuffix = messageChannelSuffix.count > 0 ? ".\(messageChannelSuffix)" : ""
+    #if os(iOS)
+      let taskQueue = binaryMessenger.makeBackgroundTaskQueue?()
+    #else
+      let taskQueue: FlutterTaskQueue? = nil
+    #endif
+    /// Records [screen] (a route pattern, at most 64 UTF-8 bytes; null clears it) as the screen
+    /// this process shows. Runs on a serial background queue: the platform thread only dispatches.
+    let setCrashScreenChannel = taskQueue == nil
+      ? FlutterBasicMessageChannel(name: "dev.flutter.pigeon.otel_zone.CrashContextApi.setCrashScreen\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+      : FlutterBasicMessageChannel(name: "dev.flutter.pigeon.otel_zone.CrashContextApi.setCrashScreen\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec, taskQueue: taskQueue)
+    if let api = api {
+      setCrashScreenChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let screenArg: String? = nilOrValue(args[0])
+        do {
+          try api.setCrashScreen(screen: screenArg)
+          reply(wrapResult(nil))
+        } catch {
+          reply(wrapError(error))
+        }
+      }
+    } else {
+      setCrashScreenChannel.setMessageHandler(nil)
+    }
+  }
+}

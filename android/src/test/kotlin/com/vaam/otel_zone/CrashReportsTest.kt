@@ -30,6 +30,7 @@ class CrashReportsTest {
         pid: Int,
         summary: String? = null,
         build: AppBuild = AppBuild.UNKNOWN,
+        screen: String? = null,
     ) =
         ExitRecord(
             pid = pid,
@@ -39,7 +40,7 @@ class CrashReportsTest {
             status = 0,
             importance = 100,
             description = "java.lang.RuntimeException: boom",
-            processStateSummary = summary?.let { RunSession.encode(it, build) },
+            processStateSummary = summary?.let { RunSession.encode(it, build, screen) },
             pssKb = 0,
             rssKb = 0,
             openTrace = { null },
@@ -50,7 +51,15 @@ class CrashReportsTest {
         at: Long,
         session: String? = null,
         build: AppBuild = AppBuild.UNKNOWN,
-    ) = CrashStore(crashes, nowMillis = { at }, pid = { pid }, sessionId = session, build = build)
+        screen: () -> String? = { null },
+    ) = CrashStore(
+        crashes,
+        nowMillis = { at },
+        pid = { pid },
+        sessionId = session,
+        build = build,
+        screen = screen,
+    )
 
     private fun reports(device: ExitRecords, sdkInt: Int = 34) =
         CrashReports(
@@ -64,8 +73,9 @@ class CrashReportsTest {
         message: String = "boom",
         session: String? = null,
         build: AppBuild = AppBuild.UNKNOWN,
+        screen: () -> String? = { null },
     ) {
-        store(pid, at, session, build).record(Thread.currentThread(), RuntimeException(message))
+        store(pid, at, session, build, screen).record(Thread.currentThread(), RuntimeException(message))
     }
 
     @Test
@@ -122,6 +132,34 @@ class CrashReportsTest {
             assertEquals("1.0.0", report.attributes?.get("otel_zone.crashed.service.version"))
             assertEquals("1", report.attributes?.get("otel_zone.crashed.app.build_id"))
         }
+    }
+
+    @Test
+    fun `a joined record keeps the jvm report's screen over the exit record's`() {
+        jvmCrash(pid = 100, at = now - 5_000, screen = { "/orders/:id" })
+        val device = Device(
+            listOf(
+                exit(now - 4_000, ApplicationExitInfo.REASON_CRASH, pid = 100, summary = "sess-1", screen = "/home"),
+            ),
+        )
+
+        val report = reports(device).pending().single()
+
+        assertEquals("/orders/:id", report.attributes?.get("otel_zone.crashed.screen"))
+    }
+
+    @Test
+    fun `a joined record takes the exit record's screen when the jvm report has none`() {
+        jvmCrash(pid = 100, at = now - 5_000)
+        val device = Device(
+            listOf(
+                exit(now - 4_000, ApplicationExitInfo.REASON_CRASH, pid = 100, summary = "sess-1", screen = "/home"),
+            ),
+        )
+
+        val report = reports(device).pending().single()
+
+        assertEquals("/home", report.attributes?.get("otel_zone.crashed.screen"))
     }
 
     @Test

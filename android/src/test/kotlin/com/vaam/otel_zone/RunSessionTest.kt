@@ -149,8 +149,10 @@ class RunSessionTest {
         }
         // Trailing bytes.
         assertNull(RunSession.decodeTag(good + byteArrayOf(0)))
-        // A format this build does not know.
+        // A format 2 summary with no screen field: format 2 needs four fields.
         assertNull(RunSession.decodeTag(byteArrayOf(2) + good.copyOfRange(1, good.size)))
+        // A format this build does not know.
+        assertNull(RunSession.decodeTag(byteArrayOf(3) + good.copyOfRange(1, good.size)))
         // A session id that is not one of ours.
         assertNull(RunSession.decodeTag(byteArrayOf(1, 3, 'a'.code.toByte(), ' '.code.toByte(), 'b'.code.toByte(), 0, 0)))
         // Over the OS limit.
@@ -173,6 +175,141 @@ class RunSessionTest {
         assertNull(badBuild?.buildId)
         assertNull(notUtf8?.versionName)
         assertEquals("s", notUtf8?.sessionId)
+    }
+
+    @Test
+    fun `a screen survives the round trip next to the session and the build`() {
+        val bytes = RunSession.encode("abc-123", AppBuild.of("1.0.1", 2), screen = "/orders/:id")
+
+        assertEquals(2, bytes[0].toInt())
+        val tag = RunSession.decodeTag(bytes)
+        assertEquals("abc-123", tag?.sessionId)
+        assertEquals("1.0.1", tag?.versionName)
+        assertEquals("2", tag?.buildId)
+        assertEquals("/orders/:id", tag?.screen)
+    }
+
+    @Test
+    fun `a summary with no screen is byte for byte the format the previous release wrote`() {
+        // Written out by hand from the format, so that a change to [encode] that
+        // moved a byte would fail here and not only in the field.
+        val expected = byteArrayOf(1, 3) + "abc".toByteArray() +
+            byteArrayOf(3) + "1.0".toByteArray() +
+            byteArrayOf(1) + "2".toByteArray()
+
+        assertContentEquals(expected, RunSession.encode("abc", AppBuild.of("1.0", 2)))
+        assertContentEquals(expected, RunSession.encode("abc", AppBuild.of("1.0", 2), screen = null))
+        assertContentEquals(expected, RunSession.encode("abc", AppBuild.of("1.0", 2), screen = " \n\t "))
+    }
+
+    @Test
+    fun `a format 1 summary decodes with no screen`() {
+        val legacyFormat1 = byteArrayOf(1, 3) + "abc".toByteArray() +
+            byteArrayOf(3) + "1.0".toByteArray() +
+            byteArrayOf(1) + "2".toByteArray()
+
+        val tag = RunSession.decodeTag(legacyFormat1)
+
+        assertEquals("abc", tag?.sessionId)
+        assertEquals("1.0", tag?.versionName)
+        assertEquals("2", tag?.buildId)
+        assertNull(tag?.screen)
+    }
+
+    @Test
+    fun `a summary over 128 bytes drops the screen first, then the version, then the build`() {
+        // 1 + 37 + 21 + 11 = 70 without the screen, and 135 with it: the screen goes,
+        // and the version and build, which now fit, stay.
+        val dropsScreen = RunSession.encode(
+            "s".repeat(36),
+            AppBuild.of("v".repeat(20), 1234567890L),
+            screen = "x".repeat(64),
+        )
+        // The screen alone is not the whole excess: without it the version is still too
+        // big, so the version goes, and the build, which fits, stays.
+        val dropsVersion = RunSession.encode(
+            "s".repeat(64),
+            AppBuild.of("v".repeat(64), 1234567890123456789L),
+            screen = "x".repeat(64),
+        )
+
+        assertTrue(dropsScreen.size <= 128)
+        assertNull(RunSession.decodeTag(dropsScreen)?.screen)
+        assertEquals("v".repeat(20), RunSession.decodeTag(dropsScreen)?.versionName)
+        assertEquals("1234567890", RunSession.decodeTag(dropsScreen)?.buildId)
+        assertTrue(dropsVersion.size <= 128)
+        assertNull(RunSession.decodeTag(dropsVersion)?.screen)
+        assertNull(RunSession.decodeTag(dropsVersion)?.versionName)
+        assertEquals("1234567890123456789", RunSession.decodeTag(dropsVersion)?.buildId)
+        assertEquals("s".repeat(64), RunSession.decodeTag(dropsVersion)?.sessionId)
+    }
+
+    @Test
+    fun `the limit holds for every screen length, multibyte too`() {
+        for (length in 0..100) {
+            for (screen in listOf("s".repeat(length), "é".repeat(length))) {
+                for (sessionLength in listOf(1, 36, 64)) {
+                    val bytes = RunSession.encode(
+                        "s".repeat(sessionLength),
+                        AppBuild.of("1.0", 7),
+                        screen = screen,
+                    )
+                    assertTrue(bytes.size <= 128, "screen $length, session $sessionLength: ${bytes.size}")
+                    assertEquals("s".repeat(sessionLength), RunSession.decodeTag(bytes)?.sessionId)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `a screen over 64 bytes or with a control character is not written`() {
+        val overlong = RunSession.encode("s", AppBuild.UNKNOWN, screen = "x".repeat(65))
+        val control = RunSession.encode("s", AppBuild.UNKNOWN, screen = "/a\nb")
+        val exact = RunSession.encode("s", AppBuild.UNKNOWN, screen = "x".repeat(64))
+
+        assertEquals(1, overlong[0].toInt())
+        assertEquals(1, control[0].toInt())
+        assertNull(RunSession.decodeTag(overlong)?.screen)
+        assertNull(RunSession.decodeTag(control)?.screen)
+        assertEquals("x".repeat(64), RunSession.decodeTag(exact)?.screen)
+    }
+
+    @Test
+    fun `a format 2 summary with missing or trailing bytes is absent`() {
+        val good = RunSession.encode("abc-123", AppBuild.of("1.0", 5), screen = "/a")
+        assertEquals(2, good[0].toInt())
+
+        // Truncated anywhere: a format 2 summary has four fields, so no prefix of it
+        // is one.
+        for (cut in 1 until good.size) {
+            assertNull(RunSession.decodeTag(good.copyOf(cut)), "cut at $cut")
+        }
+        assertNull(RunSession.decodeTag(good + byteArrayOf(0)))
+    }
+
+    @Test
+    fun `a screen field that is not clean is absent while the session is kept`() {
+        val bytes = byteArrayOf(2, 1, 's'.code.toByte(), 0, 0, 3) + "/a\u0001".toByteArray()
+
+        val tag = RunSession.decodeTag(bytes)
+
+        assertEquals("s", tag?.sessionId)
+        assertNull(tag?.screen)
+    }
+
+    @Test
+    fun `tagging passes the screen through`() {
+        var written: ByteArray? = null
+
+        val tagged = RunSession.tag(
+            sdkInt = 30,
+            sessionId = "abc-123",
+            build = AppBuild.UNKNOWN,
+            screen = "/orders/:id",
+        ) { written = it }
+
+        assertTrue(tagged)
+        assertEquals("/orders/:id", RunSession.decodeTag(written)?.screen)
     }
 
     @Test

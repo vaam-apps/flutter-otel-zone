@@ -19,6 +19,9 @@ public class OtelZonePlugin: NSObject, FlutterPlugin {
     NativeCrashApiSetup.setUp(
       binaryMessenger: registrar.messenger(),
       api: IosNativeCrashApi(repository: repository))
+    CrashContextApiSetup.setUp(
+      binaryMessenger: registrar.messenger(),
+      api: IosCrashContextApi())
   }
 
   private final class Capture {
@@ -49,9 +52,15 @@ public class OtelZonePlugin: NSObject, FlutterPlugin {
       directory: directories.metricKit, prefix: NativeCrashRepository.metricKitPrefix)
     let exceptionStore = CrashFileStore(
       directory: directories.exceptions, prefix: NativeCrashRepository.exceptionPrefix)
+    // The screen each run showed, so a MetricKit crash can be given the screen
+    // of the run it came from. Swept once here, and attached to CrashScreen
+    // before the exception handler is installed, so both read the same screen.
+    let screens = RunScreenLog(directory: directories.screens)
+    screens.sweep()
+    CrashScreen.shared.attach(screens)
     let repository = NativeCrashRepository(
       metricKit: metricKitStore, exceptions: exceptionStore,
-      ledger: AcknowledgedExceptionLedger(file: directories.ledger))
+      ledger: AcknowledgedExceptionLedger(file: directories.ledger), screens: screens)
 
     NSExceptionSource.install(store: exceptionStore)
 

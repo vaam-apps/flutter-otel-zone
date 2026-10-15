@@ -410,6 +410,74 @@ class ExitInfoSourceTest {
     }
 
     @Test
+    fun `the crashed run's screen is on its exit record, for a native crash and an ANR`() {
+        val device = Device(
+            listOf(
+                record(
+                    now - 5_000,
+                    ApplicationExitInfo.REASON_CRASH_NATIVE,
+                    status = 11,
+                    summary = RunSession.encode("sess-1", AppBuild.of("1.0.0", 1), screen = "/orders/:id"),
+                ),
+                record(
+                    now - 4_000,
+                    ApplicationExitInfo.REASON_ANR,
+                    pid = 101,
+                    summary = RunSession.encode("sess-2", screen = "/home"),
+                ),
+            ),
+        )
+
+        val (native, anr) = launch(device).pending().map { it.report }
+
+        assertEquals("/orders/:id", native.attributes?.get("otel_zone.crashed.screen"))
+        assertEquals("/home", anr.attributes?.get("otel_zone.crashed.screen"))
+    }
+
+    @Test
+    fun `an exit record from before the screen was recorded has none`() {
+        val device = Device(
+            listOf(
+                record(
+                    now - 5_000,
+                    ApplicationExitInfo.REASON_CRASH_NATIVE,
+                    status = 11,
+                    summary = RunSession.encode("sess-1", AppBuild.of("1.0.0", 1)),
+                ),
+                // The previous release's summary: the bare session id.
+                record(
+                    now - 4_000,
+                    ApplicationExitInfo.REASON_ANR,
+                    pid = 101,
+                    summary = "6f1c2a3e-1111-4222-8333-444455556666".toByteArray(),
+                ),
+            ),
+        )
+
+        val reports = launch(device).pending().map { it.report }
+
+        assertEquals(2, reports.size)
+        for (report in reports) {
+            assertNull(report.attributes?.get("otel_zone.crashed.screen"), "$report")
+        }
+    }
+
+    @Test
+    fun `two records of one death whose summaries differ only by the screen are one death`() {
+        fun crashes(first: ByteArray, second: ByteArray) = Device(
+            listOf(
+                record(now - 9_000, ApplicationExitInfo.REASON_CRASH, pid = 100, summary = first),
+                record(now - 3_000, ApplicationExitInfo.REASON_CRASH, pid = 100, summary = second),
+            ),
+        )
+        val withScreen = RunSession.encode("run-a", screen = "/a")
+        val withoutScreen = RunSession.encode("run-a")
+
+        assertEquals(1, launch(crashes(withScreen, withoutScreen)).pending().size, "screen first")
+        assertEquals(1, launch(crashes(withoutScreen, withScreen)).pending().size, "screen second")
+    }
+
+    @Test
     fun `an exit record from before the build was recorded has no build attributes, not the current one`() {
         val device = Device(
             listOf(

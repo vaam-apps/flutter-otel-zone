@@ -35,14 +35,20 @@ internal class ExitRecord(
      * Same pid and reason is not enough on its own: pids are recycled, so two
      * genuine crashes of different runs can share both. What tells the runs
      * apart is the session id each process wrote into its state summary, so
-     * two records whose summaries are both present and differ are different
-     * deaths. A missing summary is not evidence of a different run, and is
-     * treated as compatible.
+     * two records whose summaries both name a session and name different ones
+     * are different deaths. Two summaries of one session are one run, whatever
+     * screen each carried when it was written: a screen change must not split
+     * one death into two. Anything else is compared byte for byte, and a
+     * missing summary is not evidence of a different run, so it is treated as
+     * compatible.
      */
     fun isSameDeathAs(other: ExitRecord): Boolean {
         if (pid != other.pid || reason != other.reason) return false
         val mine = processStateSummary
         val theirs = other.processStateSummary
+        val mySession = RunSession.decode(mine)
+        val theirSession = RunSession.decode(theirs)
+        if (mySession != null && theirSession != null) return mySession == theirSession
         return mine == null || theirs == null || mine.contentEquals(theirs)
     }
 

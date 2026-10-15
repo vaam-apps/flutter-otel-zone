@@ -10,6 +10,13 @@ library;
 
 export 'src/bridge.dart';
 export 'src/config.dart';
+export 'src/crash-screen.dart'
+    show
+        CrashScreenSink,
+        PigeonCrashScreenSink,
+        RecordingCrashScreenSink,
+        maxCrashScreenBytes,
+        normalizeCrashScreen;
 export 'src/export-floor.dart';
 export 'src/native-crash.dart';
 export 'src/native-crash.g.dart';

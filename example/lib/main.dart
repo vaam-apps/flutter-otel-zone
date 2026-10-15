@@ -61,6 +61,10 @@ Future<void> main() => observability.runGuarded(() async {
     resourceAttributes: const <String, String>{'os.type': 'android'},
   );
 
+  // A real app calls this on every navigation, with the route pattern. The
+  // crash harness checks that a native crash record names it.
+  observability.setCrashScreen('/home');
+
   runApp(const ExampleApp());
 });
 

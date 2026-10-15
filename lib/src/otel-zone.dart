@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show Directory;
+import 'dart:io' show Directory, Platform;
 import 'dart:isolate';
 
 import 'package:dartastic_opentelemetry/dartastic_opentelemetry.dart';
@@ -13,6 +13,7 @@ import 'package:talker/talker.dart';
 
 import 'bridge.dart';
 import 'config.dart';
+import 'crash-screen.dart';
 import 'end-user.dart';
 import 'native-crash.dart';
 import 'otlp-exporter.dart';
@@ -58,11 +59,15 @@ class OtelZone {
   /// [nativeCrashSource] is the previous run's crash reports. It defaults to
   /// the plugin's Pigeon channel, and is an injection point so the drain can
   /// be tested without a device.
+  ///
+  /// [crashScreenSink] receives [setCrashScreen]'s screen. It defaults to the
+  /// plugin's Pigeon channel, and to nothing under `flutter test`.
   OtelZone(
     this.config, {
     Talker? talker,
     TalkerObserver? sink,
     NativeCrashSource? nativeCrashSource,
+    CrashScreenSink? crashScreenSink,
   }) : _nativeCrashSource = nativeCrashSource ?? PigeonNativeCrashSource() {
     bridge = OtelBridge(
       floor: config.exportFloor,
@@ -81,6 +86,10 @@ class OtelZone {
           observer: bridge,
           settings: TalkerSettings(useConsoleLogs: config.useConsoleLogs),
         );
+    _crashScreen = CrashScreenForwarder(
+      crashScreenSink ?? (_underFlutterTest() ? null : PigeonCrashScreenSink()),
+      onWarning: (String message) => this.talker.warning(message),
+    );
   }
 
   /// What this build was configured with.
@@ -103,6 +112,15 @@ class OtelZone {
   AppLifecycleListener? _lifecycle;
 
   final NativeCrashSource _nativeCrashSource;
+
+  /// Carries [setCrashScreen]'s value to the platform. Set in the constructor,
+  /// once [talker] exists.
+  late final CrashScreenForwarder _crashScreen;
+
+  String? _crashScreenValue;
+
+  /// The screen [setCrashScreen] last recorded, once normalised, or `null`.
+  String? get crashScreen => _crashScreenValue;
 
   /// Whether the SDK came up. `false` before [start], and after a [start]
   /// that failed.
@@ -160,6 +178,47 @@ class OtelZone {
   /// it. If the SDK never starts, nothing is ever stamped.
   void setEndUser(String? id) {
     _endUserId = id == null || id.isEmpty ? null : id;
+  }
+
+  /// Names the screen the app is showing, so that a native crash or an ANR of
+  /// this process can say which screen it died on. Call it on every
+  /// navigation, with the route **pattern**; `null` when no screen is shown.
+  ///
+  /// ```dart
+  /// observability.setCrashScreen('/orders/:id');
+  /// observability.setCrashScreen(null);
+  /// ```
+  ///
+  /// Pass the route pattern, `/orders/:id`, never a location with an id, a
+  /// query or any user text in it. The value is app text: it travels in the
+  /// record's attributes, and [OtelZoneConfig.redact] scrubs it at export as
+  /// it does every other attribute. It is **not** exempt, unlike `enduser.id`,
+  /// so a pattern that a redactor would mangle reaches the collector mangled.
+  ///
+  /// `null`, an empty or a blank screen clears it. So does a screen longer
+  /// than 64 UTF-8 bytes, or one with a control character: that one is not
+  /// recorded, and it is not cut to fit either.
+  ///
+  /// Only the crash records of the **next** launch carry it, as
+  /// `otel_zone.crashed.screen`, and only when it is known. Live records never
+  /// carry it, and neither does a crash the platform cannot tie to a screen.
+  /// The platforms, and the cases with no screen (an iOS hang), are in the
+  /// README's "Which screen it died on".
+  ///
+  /// **Never throws, and cheap enough for any call site.** It keeps the value
+  /// and, when the value changed, sends one message to the platform. At most
+  /// one message is in flight: a change made while it is in flight is sent
+  /// once it lands, and only the latest value is. There is no timer. Nothing is
+  /// sent on the web or on desktop, or under `flutter test` without a
+  /// [CrashScreenSink].
+  ///
+  /// Safe before [start], and it needs no SDK: the platform is told at once.
+  /// The value is process-wide, and the last call wins.
+  void setCrashScreen(String? screen) {
+    final String? value = normalizeCrashScreen(screen);
+    if (value == _crashScreenValue) return;
+    _crashScreenValue = value;
+    _crashScreen.set(value);
   }
 
   /// Brings up the OpenTelemetry SDK and points it at
@@ -659,5 +718,15 @@ class OtelZone {
       talker.warning('OTel navigation instrumentation unavailable', error);
       return null;
     }
+  }
+}
+
+/// Whether this process is a `flutter test` run, which has no platform to send
+/// the crash screen to. `false` wherever the environment cannot be read.
+bool _underFlutterTest() {
+  try {
+    return !kIsWeb && Platform.environment['FLUTTER_TEST'] == 'true';
+  } on Object {
+    return false;
   }
 }
