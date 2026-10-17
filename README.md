@@ -893,15 +893,12 @@ and then with an explicit long interval and a named list of instruments.
 
 ## Two dependency notes
 
-**`otel_go_router` declares `go_router: ^17.0.0`, and the bound is spurious.**
-That package's only go_router mentions are in doc comments —
-`OTelGoRouterObserver extends NavigatorObserver`, which is a
-`package:flutter/widgets.dart` class — and it never imports go_router at all.
-`routeObserver()` therefore works with any router, or none. An app on
-go_router 18 needs a `dependency_overrides:` entry naming **go_router** (the
-constrained package, not the one doing the constraining) until a release
-carrying [Dartastic/otel_go_router#2](https://github.com/Dartastic/otel_go_router/pull/2)
-is out.
+**`go_router` 17 and 18 both work.** Since otel_zone 0.8.0, `otel_go_router`
+0.3 accepts go_router 17 and 18 (its old `go_router: ^17.0.0` bound was
+spurious, fixed in
+[Dartastic/otel_go_router#2](https://github.com/Dartastic/otel_go_router/pull/2)),
+so no `dependency_overrides:` entry is needed. An app still on an older
+otel_zone keeps the override naming **go_router**.
 
 **`riverpod`, not `flutter_riverpod` or `hooks_riverpod`.** Only the
 `ProviderObserver` type is needed. An app on either of the other two already

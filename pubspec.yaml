@@ -17,31 +17,29 @@ dependencies:
   # The OpenTelemetry SDK. The 1.1 beta line is the *current* release —
   # 0.11.0 "stable" is an older one, not a newer, so these prereleases are
   # not a downgrade.
-  dartastic_opentelemetry: ^1.1.0-beta.15
+  dartastic_opentelemetry: ^1.1.0-beta.17
   # Semantic conventions: `App.appBuildId` for `app.build_id`.
   #
-  # Capped below rc.4, on purpose. rc.4 (2026-10-08) removed members that
-  # `dartastic_opentelemetry` beta.15 still calls (`APISpan.attributes`,
-  # `spanEvents`, `status`, ...), so that pair does not compile. `^1.0.0-rc.3`
-  # does not keep it out: pub resolves this package first, picks the newest
-  # (rc.4), and then settles for beta.15 because beta.16, which carries the
-  # same cap, is the one release that cannot sit beside rc.4. Every fresh
-  # `pub get` — CI's, an app's, the example's — got the broken pair. Lift the
-  # cap when `dartastic_opentelemetry` ships a release built on rc.4.
-  dartastic_opentelemetry_api: '>=1.0.0-rc.3 <1.0.0-rc.4'
+  # This package follows the rc.4 line. The SDK (beta.17), otel_go_router 0.3,
+  # otel_riverpod 0.3 and otel_talker 0.2 all require
+  # `>=1.0.0-rc.4 <1.0.0-rc.5`, so a wider lower bound would only promise a
+  # resolution that cannot happen. The upper bound stays exact on purpose:
+  # every rc has removed members (rc.4 dropped `APISpan.attributes`,
+  # `spanEvents` and `status`), so the next one is read before it is allowed in.
+  dartastic_opentelemetry_api: '>=1.0.0-rc.4 <1.0.0-rc.5'
   # `Int64`, which the SDK's public log-record API takes and returns for
   # timestamps but does not re-export. Already in the graph via the SDK, so
   # this adds no package an install did not already have.
   fixnum: ^1.1.1
   # Mirrors a Talker record into the OTel logs pipeline. `OtelBridge` is the
   # thing in front of it that decides which records get that far.
-  otel_talker: ^0.1.0
+  otel_talker: ^0.2.0
   # `OTelGoRouterObserver` — a plain `NavigatorObserver`, which is why
-  # `OtelZone.routeObserver()` works with any router. See the README's note
-  # on this package's spurious `go_router: ^17.0.0` bound.
-  otel_go_router: ^0.2.0
+  # `OtelZone.routeObserver()` works with any router. 0.3 accepts go_router 17
+  # and 18 and depends on the OTel API only; the app's SDK choice is its own.
+  otel_go_router: ^0.3.1
   # `OTelRiverpodObserver` — a `ProviderObserver`.
-  otel_riverpod: ^0.2.0
+  otel_riverpod: ^0.3.0
   # For the `ProviderObserver` type alone. The core package, not
   # flutter_riverpod or hooks_riverpod: an app on either of those already
   # has this, and an app on neither is not asked to take them.
