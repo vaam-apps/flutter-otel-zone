@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.8.0](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.7.0...v0.8.0) (2026-10-17)
+
+
+### Features
+
+* **deps:** go_router 18 through otel_go_router 0.3.1 and the dartastic rc.4 line ([#62](https://github.com/vaam-apps/flutter-otel-zone/issues/62)) ([8a72fc4](https://github.com/vaam-apps/flutter-otel-zone/commit/8a72fc4162f6426951176d40c490389f77385647))
+
+
+### Documentation
+
+* fespalier names the screen at the commit, before the page is built ([#61](https://github.com/vaam-apps/flutter-otel-zone/issues/61)) ([fd9ec26](https://github.com/vaam-apps/flutter-otel-zone/commit/fd9ec26464a286afe3dd1047055651e9ba9fd7eb))
+* onScreen arrives in fespalier 0.19.0, after the page's first frame ([#59](https://github.com/vaam-apps/flutter-otel-zone/issues/59)) ([d8b1e0c](https://github.com/vaam-apps/flutter-otel-zone/commit/d8b1e0cdeb04c45c96542aadd1eaf21200330c14))
+
 ## [0.7.0](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.6.0...v0.7.0) (2026-10-15)
 
 
