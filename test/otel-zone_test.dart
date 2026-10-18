@@ -33,6 +33,35 @@ class _FlushingZone extends OtelZone {
   Future<void> flushLogs() async => flushes++;
 }
 
+/// Brings the binding to `resumed`, along the edges the listener accepts.
+///
+/// The binding keeps its lifecycle state from one plain `test` to the next,
+/// every `AppLifecycleListener` this file makes starts from it, and `OtelZone`
+/// never disposes its own, so they all see the same transitions. A test
+/// cannot assume where the last one left the binding, and a transition the
+/// listener refuses is an assertion. From `paused` the way back goes through
+/// `hidden` and `inactive`. A `testWidgets` body does not fit this: the
+/// framework resets the binding to `null` after each one, and the listeners
+/// keep their state.
+void _resumeBinding(WidgetsBinding binding) {
+  final List<AppLifecycleState> route = switch (binding.lifecycleState) {
+    AppLifecycleState.paused => <AppLifecycleState>[
+      AppLifecycleState.hidden,
+      AppLifecycleState.inactive,
+      AppLifecycleState.resumed,
+    ],
+    AppLifecycleState.hidden => <AppLifecycleState>[
+      AppLifecycleState.inactive,
+      AppLifecycleState.resumed,
+    ],
+    AppLifecycleState.inactive => <AppLifecycleState>[
+      AppLifecycleState.resumed,
+    ],
+    _ => <AppLifecycleState>[AppLifecycleState.resumed],
+  };
+  route.forEach(binding.handleAppLifecycleStateChanged);
+}
+
 void main() {
   group('configuration', () {
     test('loggerName defaults to the service name', () {
@@ -501,6 +530,51 @@ void main() {
           returnsNormally,
         );
         expect(subject.flushes, 0);
+      },
+    );
+
+    // The web engine never reports `paused`. A tab that is hidden goes
+    // `inactive` on blur and `hidden` on visibilitychange, and a tab whose
+    // last view goes away is `detached`. So the flush has to run on `hidden`
+    // or a hidden web tab keeps its queue.
+    test(
+      'a web tab that is hidden flushes the queue once, with no paused',
+      () async {
+        TestWidgetsFlutterBinding.ensureInitialized();
+        final WidgetsBinding binding = WidgetsBinding.instance;
+        _resumeBinding(binding);
+        final _FlushingZone subject = _FlushingZone();
+        await subject.start(serviceVersion: '');
+        subject.bridge.ready = true;
+
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+        expect(subject.flushes, 0, reason: 'losing focus alone is not a flush');
+
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+        expect(subject.flushes, 1);
+      },
+    );
+
+    // On Android and iOS `hidden` comes just before `paused`, so both flush:
+    // two flushes. The second takes only what the first has not yet taken, and
+    // a forceFlush with nothing queued sends no request, so it costs nothing
+    // extra on the wire.
+    test(
+      'Android and iOS flush on hidden and again on paused, so two flushes',
+      () async {
+        TestWidgetsFlutterBinding.ensureInitialized();
+        final WidgetsBinding binding = WidgetsBinding.instance;
+        _resumeBinding(binding);
+        final _FlushingZone subject = _FlushingZone();
+        await subject.start(serviceVersion: '');
+        subject.bridge.ready = true;
+
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+        expect(subject.flushes, 1);
+
+        binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        expect(subject.flushes, 2);
       },
     );
   });

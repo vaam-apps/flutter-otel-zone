@@ -514,12 +514,19 @@ class OtelZone {
   /// Registers the one lifecycle hook this package needs: the moment the OS
   /// may kill a backgrounded process with records still queued.
   ///
+  /// The queue is flushed on `hidden`, `paused` and `detached`. On Android and
+  /// iOS `hidden` comes just before `paused`, so those flush twice, and the
+  /// second takes only what the first has not yet taken. The web engine never
+  /// reports `paused`, so on the web `hidden` is the state that flushes a tab
+  /// before it goes away.
+  ///
   /// Best-effort by design. Without a Flutter binding there is nothing to
   /// attach to, and that must never be a reason [start] fails.
   void _watchLifecycle() {
     if (_lifecycle != null) return;
     try {
       _lifecycle = AppLifecycleListener(
+        onHide: _flushBeforeBackground,
         onPause: _flushBeforeBackground,
         onDetach: _flushBeforeBackground,
       );
