@@ -6,6 +6,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show ServicesBinding, StringCodec;
 import 'package:flutter/widgets.dart' show AppLifecycleState, WidgetsBinding;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otel_zone/otel_zone.dart';
@@ -31,6 +32,48 @@ class _FlushingZone extends OtelZone {
 
   @override
   Future<void> flushLogs() async => flushes++;
+}
+
+/// Delivers a lifecycle [state] the way an engine does: as a message on the
+/// `flutter/lifecycle` channel, which the framework turns into the legal
+/// steps between the state it is in and [state].
+///
+/// Calling `handleAppLifecycleStateChanged` by hand skips that step. No engine
+/// reports `hidden` straight after `resumed`, so a test that did would see
+/// transitions the app never gets, and it would depend on where an earlier
+/// test left the binding, which keeps its state from one plain `test` to the
+/// next. Through the channel any state can follow any other. The delay lets
+/// the framework handle the message before the test looks.
+Future<void> _engineSends(AppLifecycleState state) async {
+  ServicesBinding.instance.channelBuffers.push(
+    'flutter/lifecycle',
+    const StringCodec().encodeMessage('AppLifecycleState.${state.name}'),
+    (_) {},
+  );
+  await Future<void>.delayed(Duration.zero);
+}
+
+/// Collects what [FlutterError.onError] receives until the test ends.
+List<FlutterErrorDetails> _collectFlutterErrors() {
+  final List<FlutterErrorDetails> reported = <FlutterErrorDetails>[];
+  final FlutterExceptionHandler? previous = FlutterError.onError;
+  FlutterError.onError = reported.add;
+  addTearDown(() => FlutterError.onError = previous);
+  return reported;
+}
+
+/// A started [_FlushingZone] with its logs pipeline ready, created while the
+/// binding is `resumed`, so its flush count starts at 0 whatever ran before.
+Future<_FlushingZone> _readyZoneWhileResumed() async {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  await _engineSends(AppLifecycleState.resumed);
+  expect(WidgetsBinding.instance.lifecycleState, AppLifecycleState.resumed);
+  final _FlushingZone subject = _FlushingZone();
+  // `start` registers the lifecycle hook; the empty version fails fast, so
+  // the SDK never comes up — readiness is then set by hand.
+  await subject.start(serviceVersion: '');
+  subject.bridge.ready = true;
+  return subject;
 }
 
 void main() {
@@ -471,19 +514,18 @@ void main() {
   });
 
   group('the lifecycle flush (ticket #6)', () {
-    test('a paused app force-flushes the logs pipeline once', () async {
-      TestWidgetsFlutterBinding.ensureInitialized();
-      final _FlushingZone subject = _FlushingZone();
-      // `start` registers the lifecycle hook; the empty version fails fast, so
-      // the SDK never comes up — readiness is then set by hand.
-      await subject.start(serviceVersion: '');
-      subject.bridge.ready = true;
+    // The framework fills in the steps between two states: `resumed` to
+    // `paused` goes through `inactive` and `hidden`, so the flush runs on
+    // `hidden` and again on `paused`.
+    test('a paused app force-flushes the logs pipeline on hidden and again on '
+        'paused, so twice', () async {
+      final List<FlutterErrorDetails> reported = _collectFlutterErrors();
+      final _FlushingZone subject = await _readyZoneWhileResumed();
 
-      WidgetsBinding.instance.handleAppLifecycleStateChanged(
-        AppLifecycleState.paused,
-      );
+      await _engineSends(AppLifecycleState.paused);
 
-      expect(subject.flushes, 1);
+      expect(subject.flushes, 2);
+      expect(reported, isEmpty);
     });
 
     test(
@@ -501,6 +543,58 @@ void main() {
           returnsNormally,
         );
         expect(subject.flushes, 0);
+      },
+    );
+
+    // The web engine never reports `paused`. A tab that is hidden goes
+    // `inactive` on blur and `hidden` on visibilitychange, and a tab whose
+    // last view goes away is `detached`. So the flush has to run on `hidden`
+    // or a hidden web tab keeps its queue.
+    test('a web tab that only loses focus flushes nothing', () async {
+      final List<FlutterErrorDetails> reported = _collectFlutterErrors();
+      final _FlushingZone subject = await _readyZoneWhileResumed();
+
+      await _engineSends(AppLifecycleState.inactive);
+
+      expect(subject.flushes, 0, reason: 'losing focus alone is not a flush');
+      expect(reported, isEmpty);
+    });
+
+    // A browser can hide a tab that never lost focus, so `hidden` follows
+    // `resumed` here.
+    test(
+      'a web tab that is hidden flushes the queue once, with no paused',
+      () async {
+        final List<FlutterErrorDetails> reported = _collectFlutterErrors();
+        final _FlushingZone subject = await _readyZoneWhileResumed();
+
+        await _engineSends(AppLifecycleState.hidden);
+
+        expect(
+          WidgetsBinding.instance.lifecycleState,
+          AppLifecycleState.hidden,
+        );
+        expect(subject.flushes, 1);
+        expect(reported, isEmpty);
+      },
+    );
+
+    // On Android and iOS `hidden` comes just before `paused`, so both flush:
+    // two flushes. The second takes only what the first has not yet taken, and
+    // a forceFlush with nothing queued sends no request, so it costs nothing
+    // extra on the wire.
+    test(
+      'Android and iOS flush on hidden and again on paused, so two flushes',
+      () async {
+        final List<FlutterErrorDetails> reported = _collectFlutterErrors();
+        final _FlushingZone subject = await _readyZoneWhileResumed();
+
+        await _engineSends(AppLifecycleState.hidden);
+        expect(subject.flushes, 1);
+
+        await _engineSends(AppLifecycleState.paused);
+        expect(subject.flushes, 2);
+        expect(reported, isEmpty);
       },
     );
   });
