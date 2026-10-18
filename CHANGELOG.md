@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.8.0...v0.8.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* queued logs are flushed when the app is hidden, so a web tab sends them ([#66](https://github.com/vaam-apps/flutter-otel-zone/issues/66)) ([dfdc070](https://github.com/vaam-apps/flutter-otel-zone/commit/dfdc070e2fbc1a8bb627193b1e96818608af38bb)), closes [#64](https://github.com/vaam-apps/flutter-otel-zone/issues/64)
+* runGuarded runs its body on the web ([#63](https://github.com/vaam-apps/flutter-otel-zone/issues/63)) ([4de651d](https://github.com/vaam-apps/flutter-otel-zone/commit/4de651d53d6b1c759c1e8edc7977a0eb000104c5))
+
 ## [0.8.0](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.7.0...v0.8.0) (2026-10-17)
 
 
