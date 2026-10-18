@@ -20,6 +20,10 @@
 # passed every gate in this repository. That is not hypothetical: the first run of
 # `:otel_zone:testDebugUnitTest` failed outright, and then failed 7/11 on a
 # path bug that would have stopped every crash report from ever being written.
+#
+# A fourth, `web`, runs the tests only a browser can: `kIsWeb` is a constant
+# on the VM and `dart:isolate` works there, so `flutter test` could not see
+# `runGuarded` never running its body on the web.
 name: ci
 
 on:
@@ -78,6 +82,38 @@ jobs:
 
       - name: Test
         run: flutter test
+
+  # Files are named one by one: the other test files are written for the VM
+  # (several use dart:io or a VM-only harness), so only the files written for a
+  # browser are named here.
+  web:
+    name: web tests in chrome
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: main
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Resolve
+        run: flutter pub get
+
+      # ubuntu-latest ships Google Chrome, which `flutter test` drives headless.
+      - name: Web tests
+        run: flutter test --platform chrome test/run-guarded-web_test.dart
+
+      # The wasm build throws from dart:isolate in a different place than DDC
+      # does (the ReceivePort constructor), so it gets its own run.
+      - name: Web tests (wasm)
+        run: flutter test --platform chrome --wasm test/run-guarded-web_test.dart
 
   android:
     name: kotlin unit tests

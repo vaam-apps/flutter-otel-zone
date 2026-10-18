@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io' show Directory, Platform;
-import 'dart:isolate';
 
 import 'package:dartastic_opentelemetry/dartastic_opentelemetry.dart';
 import 'package:flutter/foundation.dart';
@@ -18,6 +17,7 @@ import 'end-user.dart';
 import 'native-crash.dart';
 import 'otlp-exporter.dart';
 import 'riverpod-arguments.dart';
+import 'root-isolate-errors.dart';
 import 'span-redaction.dart';
 import 'spool.dart';
 
@@ -559,10 +559,21 @@ class OtelZone {
   /// The binding has to be created inside this zone rather than before it:
   /// Flutter records the zone that created the binding and warns (and can
   /// mis-route errors) if `runApp` is later called from a different one.
+  ///
+  /// On the web, which has no isolates, the fourth channel is not installed:
+  /// `dart:isolate` throws there, and before 0.8.1 that kept [body] from ever
+  /// running. The web engine never calls `PlatformDispatcher.onError` either:
+  /// it runs its callbacks in the zone they were registered from, so their
+  /// errors reach this zone's handler.
+  ///
+  /// A throw before [body], or out of it, is reported by the handler, and the
+  /// future this returns then never completes (an error does not leave its
+  /// error zone). An error the body leaves uncaught is reported, and the body
+  /// carries on.
   Future<void> runGuarded(Future<void> Function() body) async {
-    // `runZonedGuarded` returns the body's own future, or `null` if the
-    // zone died before it completed; awaiting it either way is what makes a
-    // start-up failure surface here rather than as a silent blank screen.
+    // Awaited so this returns once the body has finished. A failure does not
+    // come out of the zone: the handler below reports it, and this future then
+    // never completes.
     await runZonedGuarded<Future<void>>(
       () async {
         // Framework errors: build/layout/paint failures, failed assertions.
@@ -611,32 +622,17 @@ class OtelZone {
           return true;
         };
 
-        _listenForRootIsolateErrors();
+        listenForRootIsolateErrors(
+          onError: (Object error, StackTrace stack) =>
+              reportError(error, stack, context: 'Root isolate'),
+          onWarning: talker.warning,
+        );
 
         await body();
       },
       (Object error, StackTrace stack) =>
           reportError(error, stack, context: 'Uncaught zone error'),
     );
-  }
-
-  /// Errors thrown on the root isolate outside any zone — e.g. from a
-  /// platform-channel handler registered by a plugin.
-  ///
-  /// The port delivers `[String error, String stackTrace]`, already
-  /// stringified, because an arbitrary error object may not be sendable
-  /// across an isolate boundary.
-  void _listenForRootIsolateErrors() {
-    final ReceivePort port = ReceivePort()
-      ..listen((dynamic pair) {
-        if (pair is! List || pair.length < 2) return;
-        reportError(
-          pair.first?.toString() ?? 'Unknown isolate error',
-          StackTrace.fromString(pair.last?.toString() ?? ''),
-          context: 'Root isolate',
-        );
-      });
-    Isolate.current.addErrorListener(port.sendPort);
   }
 
   /// Runs [emit] only if OpenTelemetry is up, and never lets it throw.

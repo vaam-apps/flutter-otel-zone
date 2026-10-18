@@ -17,7 +17,10 @@ Four things that are only correct together:
   channels — `FlutterError.onError`, `PlatformDispatcher.onError`, the zone's
   own handler and `Isolate.addErrorListener` — to one reporting function. Each
   has a different default and some swallow silently, so anything less than all
-  four means a class of crash never reaches the logs.
+  four means a class of crash never reaches the logs. On the web, which has no
+  isolates, framework errors (`FlutterError.onError`) and zone errors are
+  reported, and errors from engine callbacks arrive through the zone handler
+  (see [On the web](#on-the-web)).
 - **The sink** — One `Talker`. Riverpod transitions, route changes, classified
   failures and uncaught errors all land on it, so there is no second reporting
   path to keep in sync.
@@ -855,6 +858,22 @@ values are credentials and are never logged. dartastic parses the variable
 itself and does not URL-decode values as the OTLP specification asks; that is
 inherited, not worked around.
 
+## On the web
+
+Since otel_zone 0.8.1 `runGuarded` runs on the web, so wrap `main()` the same
+way on every platform. Before 0.8.1 it never ran its body there and the page
+stayed blank: it opened a `ReceivePort`, Dart's web runtime throws
+`UnsupportedError` for that, and the zone's own handler took the error. An app that wrote
+`kIsWeb ? body() : observability.runGuarded(body)` drops the `kIsWeb` branch
+once it pins 0.8.1 or later.
+
+There, framework errors and uncaught async errors are reported.
+`Isolate.addErrorListener` is not installed, and the web engine never calls
+`PlatformDispatcher.onError`: an error escaping one of its callbacks goes to
+the zone the callback was registered from, which inside `runGuarded` is this
+one. Native crash capture and `setCrashScreen` do nothing on the web (see
+[Native crashes](#native-crashes)).
+
 ## Telemetry never blocks the app
 
 Two rules, and both are load-bearing rather than defensive dressing.
@@ -930,6 +949,10 @@ crashScreen.screens; // ['/orders/:id'], once the message has been sent
 
 `flutter test` in this repository is the whole contract above — the floor, the
 breadcrumbs, the redaction and the start-up summary — and needs no device.
+
+`test/run-guarded-web_test.dart` needs a browser:
+`flutter test --platform chrome test/run-guarded-web_test.dart` (CI's `web`
+job). Plain `flutter test` skips it.
 
 ## Licence
 
