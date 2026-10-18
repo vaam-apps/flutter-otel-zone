@@ -83,8 +83,9 @@ jobs:
       - name: Test
         run: flutter test
 
-  # Files are named one by one: the rest of test/ needs dart:io at run time
-  # (files, sockets), which a browser does not have.
+  # Files are named one by one: the other test files are written for the VM
+  # (several use dart:io or a VM-only harness), so only the files written for a
+  # browser are named here.
   web:
     name: web tests in chrome
     runs-on: ubuntu-latest
@@ -108,6 +109,11 @@ jobs:
       # ubuntu-latest ships Google Chrome, which `flutter test` drives headless.
       - name: Web tests
         run: flutter test --platform chrome test/run-guarded-web_test.dart
+
+      # The wasm build throws from dart:isolate in a different place than DDC
+      # does (the ReceivePort constructor), so it gets its own run.
+      - name: Web tests (wasm)
+        run: flutter test --platform chrome --wasm test/run-guarded-web_test.dart
 
   android:
     name: kotlin unit tests

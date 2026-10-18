@@ -9,6 +9,7 @@ library;
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show WidgetsFlutterBinding;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otel_zone/otel_zone.dart';
 import 'package:talker/talker.dart';
@@ -90,7 +91,11 @@ void main() {
     FlutterError.onError = null;
 
     await _guarded(subject, () async {
-      FlutterError.onError!(
+      // The binding is made inside the zone, as an app's `main` makes it, and
+      // the report goes through the framework's entry point rather than into
+      // the handler directly.
+      WidgetsFlutterBinding.ensureInitialized();
+      FlutterError.reportError(
         FlutterErrorDetails(
           exception: StateError('a build failed'),
           context: ErrorDescription('while laying out'),

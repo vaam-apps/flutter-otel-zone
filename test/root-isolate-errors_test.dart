@@ -1,6 +1,7 @@
-// `listenForRootIsolateErrors`, off the browser: the web skip and the
-// never-throws contract. The browser half, that `runGuarded` runs its body on
-// the web, is `run-guarded-web_test.dart`, which plain `flutter test` skips.
+// `listenForRootIsolateErrors`, off the browser: on the web it is a no-op that
+// returns false and touches nothing, and on the VM it listens and returns true.
+// The browser half, that `runGuarded` runs its body on the web, is
+// `run-guarded-web_test.dart`, which plain `flutter test` skips.
 @TestOn('vm')
 library;
 

@@ -7,9 +7,11 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 /// returns whether it is listening.
 ///
 /// Not on the web, which has no isolates: `dart:isolate` compiles for a browser
-/// but `ReceivePort` and `Isolate.current` throw `UnsupportedError` there, and
-/// before 0.8.1 that throw kept `OtelZone.runGuarded` from running its body. On
-/// the web this tries nothing and returns `false`.
+/// but Dart's web runtime throws `UnsupportedError` from it (from
+/// `ReceivePort.listen` and `sendPort` under DDC and dart2js, from the
+/// `ReceivePort` constructor under wasm), and before 0.8.1 that throw kept
+/// `OtelZone.runGuarded` from running its body. On the web this tries nothing
+/// and returns `false`.
 ///
 /// Never throws. Anywhere else a failure to listen is one line on [onWarning]
 /// and `false`: an error hook is never the reason an app does not start.

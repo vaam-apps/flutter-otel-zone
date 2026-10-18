@@ -566,10 +566,10 @@ class OtelZone {
   /// it runs its callbacks in the zone they were registered from, so their
   /// errors reach this zone's handler.
   ///
-  /// Nothing ahead of [body] may throw: an error in this zone, before the body
-  /// or inside it, goes to the handler and is reported, and the future this
-  /// returns then never completes, because an error does not leave its error
-  /// zone.
+  /// A throw before [body], or out of it, is reported by the handler, and the
+  /// future this returns then never completes (an error does not leave its
+  /// error zone). An error the body leaves uncaught is reported, and the body
+  /// carries on.
   Future<void> runGuarded(Future<void> Function() body) async {
     // Awaited so this returns once the body has finished. A failure does not
     // come out of the zone: the handler below reports it, and this future then
