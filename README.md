@@ -874,10 +874,11 @@ the zone the callback was registered from, which inside `runGuarded` is this
 one. Native crash capture and `setCrashScreen` do nothing on the web (see
 [Native crashes](#native-crashes)).
 
-Since otel_zone 0.8.1 the queued records are flushed when the tab is hidden
-(switching to another tab, or minimising the window) and when its last view
-goes away. A flush still in flight when the page unloads can be cut short by
-the browser, so records sent as a tab closes are best effort.
+Since otel_zone 0.8.1 the queued records are also flushed when the tab is
+hidden (switching to another tab, minimising the window, or closing it). They
+already were when the host page removes the app's last view. A flush still in
+flight when the page unloads can be cut short by the browser, so records sent
+as a tab closes are best effort.
 
 ## Telemetry never blocks the app
 
