@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.8.1...v0.8.2) (2026-10-21)
+
+
+### Documentation
+
+* add a VitePress documentation site with the vaam-apps Material 3 theme ([#67](https://github.com/vaam-apps/flutter-otel-zone/issues/67)) ([8b9b29c](https://github.com/vaam-apps/flutter-otel-zone/commit/8b9b29cb2dad7637214d3087b958c8ffe9ba1092))
+
 ## [0.8.1](https://github.com/vaam-apps/flutter-otel-zone/compare/v0.8.0...v0.8.1) (2026-10-18)
 
 
