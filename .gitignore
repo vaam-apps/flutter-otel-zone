@@ -32,3 +32,7 @@ pubspec.lock
 
 # Node (ci/commit-message-parse)
 node_modules/
+
+# The VitePress docs site's build output and cache (docs/.vitepress).
+docs/.vitepress/dist
+docs/.vitepress/cache
